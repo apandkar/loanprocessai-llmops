@@ -29,7 +29,9 @@ jobs:
 
       - name: Check Python syntax
         run: python -m compileall -q backend
-
+       
+      - name: Intentional failure demonstration
+        run: python -c "raise SystemExit('Intentional CI failure')"
 
   frontend-checks:
     name: Frontend checks
