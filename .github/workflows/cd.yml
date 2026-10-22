@@ -1,0 +1,71 @@
+name: Deploy Backend to Azure
+
+on:
+  push:
+    branches: [main, feature/add-cd]
+    paths:
+      - "backend/**"
+      - ".github/workflows/cd.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to Azure Container Registry
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+
+      - name: Build backend image
+        run: |
+          docker build \
+            -t "${{ vars.ACR_NAME }}.azurecr.io/loanprocessai-api:${{ github.sha }}" \
+            ./backend
+
+      - name: Push backend image
+        run: |
+          docker push \
+            "${{ vars.ACR_NAME }}.azurecr.io/loanprocessai-api:${{ github.sha }}"
+
+      - name: Verify Azure deployment target
+        run: |
+          echo "Subscription:"
+          az account show --query "{name:name,id:id}" -o table
+
+          echo "Expected resource group: ${{ vars.AZURE_RESOURCE_GROUP }}"
+          echo "Expected Container App: ${{ vars.CONTAINER_APP_NAME }}"
+
+          echo "Container Apps visible in resource group:"
+          az containerapp list \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --query "[].{name:name,resourceGroup:resourceGroup}" \
+            -o table
+      - name: Deploy to Azure Container Apps
+        run: |
+          az containerapp update \
+            --name "${{ vars.CONTAINER_APP_NAME }}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --image "${{ vars.ACR_NAME }}.azurecr.io/loanprocessai-api:${{ github.sha }}"
+
+      - name: Show deployed URL
+        run: |
+          az containerapp show \
+            --name "${{ vars.CONTAINER_APP_NAME }}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv
