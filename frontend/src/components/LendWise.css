@@ -1,0 +1,329 @@
+
+
+.lendwise-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.lendwise-fab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1a5276, #2980b9);
+  border: none;
+  border-radius: 50%;
+  width: 56px;
+  height: 56px;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(26, 82, 118, 0.4);
+  transition: all 0.3s ease;
+  color: white;
+}
+
+.lendwise-fab:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 28px rgba(26, 82, 118, 0.5);
+}
+
+.lendwise-fab-open {
+  border-radius: 50%;
+  background: #e74c3c;
+}
+
+.lendwise-fab-open:hover {
+  box-shadow: 0 6px 28px rgba(231, 76, 60, 0.5);
+}
+
+.lendwise-fab-icon {
+  width: 26px;
+  height: 26px;
+  filter: brightness(0) invert(1);
+}
+
+.lendwise-fab-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: white;
+  white-space: nowrap;
+}
+
+.lendwise-window {
+  position: absolute;
+  bottom: 70px;
+  right: 0;
+  width: 320px;
+  height: 440px;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: lendwiseSlideUp 0.3s ease;
+}
+
+@keyframes lendwiseSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.lendwise-header {
+  background: linear-gradient(135deg, #1a5276, #2980b9);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.lendwise-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lendwise-header-icon {
+  width: 40px;
+  height: 40px;
+  background: white;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.lendwise-logo {
+  width: 28px;
+  height: 28px;
+}
+
+.lendwise-title {
+  color: white;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.lendwise-subtitle {
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 11px;
+}
+
+.lendwise-close {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0.8;
+  transition: opacity 0.2s;
+}
+
+.lendwise-close:hover {
+  opacity: 1;
+}
+
+.lendwise-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #f8f9fa;
+}
+
+.lendwise-messages::-webkit-scrollbar {
+  width: 5px;
+}
+
+.lendwise-messages::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 4px;
+}
+
+.lendwise-msg {
+  display: flex;
+  gap: 8px;
+  max-width: 90%;
+}
+
+.lendwise-msg-user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.lendwise-msg-assistant {
+  align-self: flex-start;
+}
+
+.lendwise-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1a5276, #2980b9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.lendwise-avatar img {
+  width: 16px;
+  height: 16px;
+  filter: brightness(0) invert(1);
+}
+
+.lendwise-bubble {
+  padding: 10px 14px;
+  border-radius: 14px;
+  line-height: 1.5;
+}
+
+.lendwise-bubble-assistant {
+  background: white;
+  color: #2c3e50;
+  border: 1px solid #e8ecf1;
+  border-top-left-radius: 4px;
+}
+
+.lendwise-bubble-user {
+  background: linear-gradient(135deg, #1a5276, #2980b9);
+  color: white;
+  border-top-right-radius: 4px;
+}
+
+.lendwise-text {
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.lendwise-text strong {
+  font-weight: 600;
+}
+
+.lendwise-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.lendwise-suggestion-btn {
+  background: #eaf2f8;
+  color: #1a5276;
+  border: 1px solid #d4e6f1;
+  border-radius: 20px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.lendwise-suggestion-btn:hover {
+  background: #1a5276;
+  color: white;
+  border-color: #1a5276;
+}
+
+.lendwise-suggestion-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.lendwise-typing {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.lendwise-typing span {
+  width: 7px;
+  height: 7px;
+  background: #aab7c4;
+  border-radius: 50%;
+  animation: lendwiseBounce 1.4s ease-in-out infinite;
+}
+
+.lendwise-typing span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.lendwise-typing span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes lendwiseBounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-6px);
+  }
+}
+
+.lendwise-input-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid #e8ecf1;
+  background: white;
+  flex-shrink: 0;
+}
+
+.lendwise-input {
+  flex: 1;
+  border: 1px solid #dce4ec;
+  border-radius: 24px;
+  padding: 10px 16px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+  font-family: inherit;
+}
+
+.lendwise-input:focus {
+  border-color: #2980b9;
+}
+
+.lendwise-input::placeholder {
+  color: #95a5a6;
+}
+
+.lendwise-send {
+  background: linear-gradient(135deg, #1a5276, #2980b9);
+  border: none;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: white;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.lendwise-send:hover:not(:disabled) {
+  transform: scale(1.05);
+}
+
+.lendwise-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

@@ -1,0 +1,41 @@
+backend/.env
+backend/.env_old
+.env
+backend/data/
+frontend/.env.local
+frontend/.env.development.local
+frontend/*.log
+backend/*.log
+__pycache__/
+*.pyc
+
+# Python environments and caches
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend dependencies and build output
+node_modules/
+frontend/build/
+frontend/dist/
+
+# Runtime logs and generated telemetry
+logs/
+*.log
+*.jsonl
+*.out.log
+*.err.log
+
+# Generated packages and local tooling
+dist/
+.tmp-pip/
+.pdf-reader/
+.pptx-reader/
+*.zip
+
+# OS and Office temporary files
+.DS_Store
+Thumbs.db
+~$*

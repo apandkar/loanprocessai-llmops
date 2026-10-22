@@ -1,0 +1,37 @@
+{
+  "name": "loanprocessai",
+  "version": "1.0.0",
+  "description": "LoanProcessAI - Commercial Lending Operations",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^6.20.0",
+    "react-scripts": "5.0.1",
+    "remark-gfm": "^4.0.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "start:all": "concurrently --kill-others-on-fail --names BACKEND,FRONTEND --prefix-colors blue,green \"npm run start:backend\" \"react-scripts start\"",
+    "start:backend": "cd .. && python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload --reload-dir backend",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

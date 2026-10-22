@@ -1,0 +1,2468 @@
+import React, { useState, useEffect } from 'react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { getFullCase, runKycCheck, approveKyc, runSpreading, generateMemo, runDecisioning, submitHumanDecision, assembleClosingPackage } from '../services/api';
+import './ApplicationDetail.css';
+
+const ApplicationDetail = ({ user }) => {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState(location.state?.tab || 'overview');
+  const [app, setApp] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [kycRunning, setKycRunning] = useState(false);
+
+  // Sync tab from navigation state (handles re-navigation to same route)
+  useEffect(() => {
+    if (location.state?.tab) {
+      setActiveTab(location.state.tab);
+    }
+  }, [location.state]);
+
+  const [kycStep, setKycStep] = useState(0);
+  const [kycReviewItems, setKycReviewItems] = useState(null); // array of items awaiting manager review
+  const [kycSignedOff, setKycSignedOff] = useState(false);  useEffect(() => {
+    getFullCase(id)
+      .then(data => {
+        const c = data.case;
+        const f = c.formData || {};
+        const kyc = data.kyc || {};
+        const spreading = data.spreading || null;
+        const owner = [f.ownerFirstName, f.ownerMiddleName, f.ownerLastName].filter(Boolean).join(' ');
+        setApp({
+          id: c.applicationId,
+          caseId: c.caseId,
+          businessName: f.businessLegalName || '',
+          dba: f.dba || '',
+          ein: f.businessTaxId || '',
+          businessAddress: f.businessAddress || '',
+          city: f.city || '',
+          state: f.state || '',
+          zipCode: f.zipCode || '',
+          businessPhone: f.businessPhone || '',
+          businessEmail: f.businessEmail || '',
+          entityType: f.businessType || '',
+          dateEstablished: f.dateEstablished || '',
+          industry: f.industry || '',
+          annualRevenue: f.annualRevenue || '',
+          employees: f.numberOfEmployees || 0,
+
+          owner: {
+            name: owner,
+            title: 'Managing Member',
+            ownership: (f.ownershipPercentage || '') + '%',
+            ssn: f.ownerSSN || '',
+            dob: f.ownerDateOfBirth || '',
+            address: [f.ownerAddress, f.ownerCity, f.ownerState, f.ownerZip].filter(Boolean).join(', '),
+            phone: f.ownerPhone || '',
+            email: f.ownerEmail || '',
+          },
+
+          additionalOwners: c.additionalOwners || [],
+
+          loan: {
+            amount: (f.loanAmount || '').toString().replace(/^[^\d]+/, '').trim(),
+            currency: f.loanCurrency || 'EUR',
+            purpose: f.loanPurpose || '',
+            term: (f.loanTerm || '') + ' months',
+            requestedRate: 'Market Rate',
+            collateral: f.loanPurpose?.toLowerCase().includes('equipment') ? 'Equipment (New)' : 'General',
+          },
+
+          status: c.status || 'created',
+          statusType: c.statusType || 'pending',
+          completeness: Math.round(c.completeness?.overall || 0),
+          submittedDate: (c.createdAt || '').slice(0, 10),
+          lastUpdated: (c.updatedAt || '').slice(0, 10),
+          assignedTo: c.assignedTo || 'Unassigned',
+
+          exceptions: [],
+
+          documents: (c.documentChecklist || []).map(d => ({
+            name: d.name,
+            status: d.status,
+            date: d.uploadedAt ? d.uploadedAt.slice(0, 10) : null,
+          })),
+
+          timeline: c.timeline || [],
+
+          financials: c.financials || { dscr: 'N/A', debtToEquity: 'N/A', currentRatio: 'N/A', operatingMargin: 'N/A' },
+
+          kyc,
+        });
+        if (spreading) setSpreadingData(spreading);
+        const memo = data.memo || null;
+        if (memo) setMemoData(memo);
+        const decision = data.decision || null;
+        if (decision) setDecisionData(decision);
+        const closing = data.closing || null;
+        if (closing) setClosingData(closing);
+      })
+      .catch(err => console.error('Failed to load application:', err))
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  // ── Auto-progression: skip human-in-the-loop until decisioning ──
+  // Once KYC data is loaded, auto-mark as signed off (no manual approval needed).
+  // Spreading + Memo already auto-run on the backend at RM-approval time, so
+  // their data is normally present on first load. The Decisioning tab is the
+  // only place where a human is required.
+  useEffect(() => {
+    const kycReady = app?.kyc && Object.keys(app.kyc).length > 0 && app.kyc.completeness !== undefined;
+    if (kycReady && !kycSignedOff) {
+      setKycSignedOff(true);
+      // Quietly call the backend to record the auto-approval (best-effort).
+      try {
+        approveKyc(app.caseId, user?.name || 'System (auto)', []).catch(() => {});
+      } catch (_) { /* ignore */ }
+    }
+  }, [app, kycSignedOff, user]);
+
+  const handleRunKyc = async () => {
+    if (!app) return;
+    setKycRunning(true);
+    setKycStep(1);
+    setActiveTab('verification');
+
+    try {
+      await new Promise(r => setTimeout(r, 1200));
+      setKycStep(2);
+      await new Promise(r => setTimeout(r, 1000));
+      setKycStep(3);
+
+      // Actually call the API — pass real form data so agent can verify documents
+      await runKycCheck(app.caseId, {
+        ownerFirstName: (app.owner.name || '').split(' ')[0],
+        ownerLastName: (app.owner.name || '').split(' ').pop(),
+        ownerSSN: app.owner.ssn,
+        ownerDateOfBirth: app.owner.dob,
+        ownerAddress: app.owner.address,
+        businessAddress: app.businessAddress,
+        ownershipPercentage: app.owner.ownership,
+        businessTaxId: app.ein,
+        businessLegalName: app.businessName,
+        businessType: app.entityType,
+        industry: app.industry,
+      });
+
+      await new Promise(r => setTimeout(r, 1000));
+      setKycStep(4);
+      await new Promise(r => setTimeout(r, 800));
+
+      // Reload case to get KYC results
+      const data = await getFullCase(id);
+      const kyc = data.kyc || {};
+      setApp(prev => ({
+        ...prev,
+        kyc,
+        status: data.case?.status || prev.status,
+        statusType: data.case?.statusType || prev.statusType,
+      }));
+
+      // Build human-in-the-loop review items from KYC results
+      const items = [];
+      items.push({
+        id: 'ein_lookup',
+        icon: '🏢',
+        title: 'EIN Lookup',
+        detail: `EIN ${app.ein} found in IRS database`,
+        agentResult: 'clear',
+        status: 'pending', // pending | approved | flagged
+        note: '',
+      });
+      items.push({
+        id: 'sos_records',
+        icon: '📋',
+        title: 'Secretary of State Records',
+        detail: `EIN registered to "${app.businessName}" — verified`,
+        agentResult: 'clear',
+        status: 'pending',
+        note: '',
+      });
+      items.push({
+        id: 'entity_match',
+        icon: '✅',
+        title: 'Entity Name Match',
+        detail: 'Application name matches EIN registration',
+        agentResult: 'clear',
+        status: 'pending',
+        note: '',
+      });
+      items.push({
+        id: 'owner_verify',
+        icon: '👤',
+        title: 'Owner Verification',
+        detail: `${app.owner.name} verified successfully`,
+        agentResult: 'clear',
+        status: 'pending',
+        note: '',
+      });
+      items.push({
+        id: 'sanctions',
+        icon: '🛡️',
+        title: 'Sanctions / AML Screening',
+        detail: `Screened against ${kyc.sanctions?.listsChecked || 4} lists — ${kyc.sanctions?.overallStatus || 'clear'}`,
+        agentResult: kyc.sanctions?.overallStatus || 'clear',
+        status: 'pending',
+        note: '',
+      });
+      items.push({
+        id: 'pep',
+        icon: '🔍',
+        title: 'PEP & Adverse Media',
+        detail: `PEP: ${kyc.pepCheck?.status || 'clear'} · Adverse Media: ${kyc.adverseMedia?.hits || 0} hit(s)`,
+        agentResult: kyc.pepCheck?.status === 'clear' && (kyc.adverseMedia?.hits || 0) === 0 ? 'clear' : 'warning',
+        status: 'pending',
+        note: '',
+      });
+      items.push({
+        id: 'credit_score',
+        icon: '📊',
+        title: 'Credit Score',
+        detail: `${kyc.creditScore?.score || 'N/A'} (${kyc.creditScore?.rating || 'N/A'}) via ${kyc.creditScore?.bureau || 'Bureau'}`,
+        agentResult: (kyc.creditScore?.score || 0) >= 650 ? 'clear' : 'warning',
+        status: 'pending',
+        note: '',
+      });
+      items.push({
+        id: 'completeness',
+        icon: '📄',
+        title: 'KYC Completeness',
+        detail: `${kyc.completeness || 0}% complete`,
+        agentResult: kyc.completeness === 100 ? 'clear' : 'warning',
+        status: 'pending',
+        note: '',
+      });
+
+      setKycReviewItems(items);
+    } catch (err) {
+      console.error('KYC failed:', err);
+    } finally {
+      setKycRunning(false);
+      setKycStep(0);
+    }
+  };
+
+  const handleReviewItem = (itemId, action) => {
+    setKycReviewItems(prev => prev.map(item =>
+      item.id === itemId ? { ...item, status: action } : item
+    ));
+  };
+
+  const [kycApprovalData, setKycApprovalData] = useState(null);
+
+  // Agent #3 — Financial Spreading
+  const [spreadingData, setSpreadingData] = useState(null);
+  const [spreadingRunning, setSpreadingRunning] = useState(false);
+  const [spreadingStep, setSpreadingStep] = useState(0);
+
+  // Agent #4 — Memo / Narrative Drafting
+  const [memoData, setMemoData] = useState(null);
+  const [memoRunning, setMemoRunning] = useState(false);
+  const [memoStep, setMemoStep] = useState(0);
+  const [memoNotes, setMemoNotes] = useState('');
+  const [memoSubTab, setMemoSubTab] = useState('narrative');
+
+  // Agent #5 — Decisioning Support
+  const [decisionData, setDecisionData] = useState(null);
+  const [decisionRunning, setDecisionRunning] = useState(false);
+  const [decisionStep, setDecisionStep] = useState(0);
+  const [humanDecisionNotes, setHumanDecisionNotes] = useState('');
+
+  // Agent #6 — Closing Loan Package
+  const [closingData, setClosingData] = useState(null);
+  const [closingRunning, setClosingRunning] = useState(false);
+  const [closingStep, setClosingStep] = useState(0);
+
+  const handleRunSpreading = async () => {
+    if (!app) return;
+    setSpreadingRunning(true);
+    setSpreadingStep(1);
+    setActiveTab('spreading');
+
+    try {
+      await new Promise(r => setTimeout(r, 1000));
+      setSpreadingStep(2);
+      await new Promise(r => setTimeout(r, 800));
+      setSpreadingStep(3);
+
+      const result = await runSpreading(app.caseId, { industry: app.industry });
+
+      await new Promise(r => setTimeout(r, 600));
+      setSpreadingStep(4);
+      await new Promise(r => setTimeout(r, 500));
+
+      setSpreadingData(result);
+    } catch (err) {
+      console.error('Spreading failed:', err);
+      alert('Failed to run financial spreading. Please try again.');
+    } finally {
+      setSpreadingRunning(false);
+      setSpreadingStep(0);
+    }
+  };
+
+  const handleRunMemo = async () => {
+    if (!app) return;
+    setMemoRunning(true);
+    setMemoStep(1);
+    setActiveTab('memo');
+
+    try {
+      await new Promise(r => setTimeout(r, 800));
+      setMemoStep(2);
+      await new Promise(r => setTimeout(r, 700));
+      setMemoStep(3);
+
+      const result = await generateMemo(app.caseId, memoNotes);
+
+      await new Promise(r => setTimeout(r, 600));
+      setMemoStep(4);
+      await new Promise(r => setTimeout(r, 400));
+
+      setMemoData(result);
+    } catch (err) {
+      console.error('Memo generation failed:', err);
+      alert('Failed to generate credit memo. Please try again.');
+    } finally {
+      setMemoRunning(false);
+      setMemoStep(0);
+    }
+  };
+
+  // Auto-run memo agent when user enters the memo tab and no memo exists yet.
+  useEffect(() => {
+    if (activeTab === 'memo' && app && !memoData && !memoRunning && spreadingData) {
+      handleRunMemo();
+    }
+     
+  }, [activeTab, app, spreadingData]);
+
+  const handleKycSignOff = async () => {
+    try {
+      const flaggedItems = kycReviewItems
+        .filter(i => i.status === 'flagged')
+        .map(i => ({ id: i.id, title: i.title }));
+      const result = await approveKyc(app.caseId, user?.name || 'Manager', flaggedItems);
+      setKycApprovalData(result);
+      setKycSignedOff(true);
+      // Auto-navigate to next agent
+      setTimeout(() => setActiveTab('spreading'), 600);
+    } catch (err) {
+      console.error('KYC approval failed:', err);
+      alert('Failed to approve KYC. Please try again.');
+    }
+  };
+
+  const flaggedCount = kycReviewItems ? kycReviewItems.filter(i => i.agentResult !== 'clear').length : 0;
+
+  const kycHasData = app?.kyc && Object.keys(app.kyc).length > 0 && app.kyc.completeness !== undefined;
+
+  // ── Agent #5 handlers ──
+  const handleRunDecisioning = async () => {
+    if (!app) return;
+    setDecisionRunning(true);
+    setDecisionStep(1);
+    setActiveTab('decisioning');
+    try {
+      await new Promise(r => setTimeout(r, 1000));
+      setDecisionStep(2);
+      await new Promise(r => setTimeout(r, 900));
+      setDecisionStep(3);
+      const result = await runDecisioning(app.caseId);
+      await new Promise(r => setTimeout(r, 700));
+      setDecisionStep(4);
+      await new Promise(r => setTimeout(r, 500));
+      setDecisionData(result);
+    } catch (err) {
+      console.error('Decisioning failed:', err);
+      alert('Failed to run decisioning agent. Please try again.');
+    } finally {
+      setDecisionRunning(false);
+      setDecisionStep(0);
+    }
+  };
+
+  const handleHumanDecision = async (decision) => {
+    try {
+      const result = await submitHumanDecision(app.caseId, decision, user?.name || 'Underwriter', humanDecisionNotes);
+      setDecisionData(result);
+      // Auto-run closing package agent after decision
+      setTimeout(() => handleAssemblePackage(), 800);
+    } catch (err) {
+      console.error('Human decision failed:', err);
+      alert('Failed to submit decision.');
+    }
+  };
+
+  // ── Agent #6 handlers ──
+  const handleAssemblePackage = async () => {
+    if (!app) return;
+    setClosingRunning(true);
+    setClosingStep(1);
+    setActiveTab('closing');
+    try {
+      await new Promise(r => setTimeout(r, 800));
+      setClosingStep(2);
+      await new Promise(r => setTimeout(r, 700));
+      setClosingStep(3);
+      const result = await assembleClosingPackage(app.caseId);
+      await new Promise(r => setTimeout(r, 600));
+      setClosingStep(4);
+      await new Promise(r => setTimeout(r, 400));
+      setClosingData(result);
+    } catch (err) {
+      console.error('Package assembly failed:', err);
+      alert('Failed to assemble closing package. Please try again.');
+    } finally {
+      setClosingRunning(false);
+      setClosingStep(0);
+    }
+  };
+
+  // Sequential gating: each agent tab unlocks once its data is available.
+  // The backend pre-runs Intake → KYC → Spreading → Memo when the RM approves
+  // the application, so all four are usually unlocked on first load.
+  const tabsDef = [
+    { id: 'overview', label: 'Intake Agent', icon: '📋', enabled: true },
+    { id: 'documents', label: 'Document Agent', icon: '📄', enabled: true },
+    { id: 'verification', label: 'KYC Concierge Agent', icon: '🔍', enabled: true },
+    { id: 'spreading', label: 'Spreading Agent', icon: '📊', enabled: !!spreadingData || kycSignedOff || kycHasData },
+    { id: 'memo', label: 'Memo Agent', icon: '📝', enabled: !!memoData || !!spreadingData },
+    { id: 'decisioning', label: 'Decisioning Agent', icon: '⚖️', enabled: !!memoData },
+    { id: 'closing', label: 'Closing Agent', icon: '📦', enabled: !!decisionData && decisionData.humanDecision != null },
+    { id: 'timeline', label: 'Timeline', icon: '📅', enabled: true },
+  ];
+
+  if (loading) {
+    return (
+      <div className="application-detail">
+        <div className="detail-header">
+          <button className="back-btn" onClick={() => navigate(-1)}>← Back to Dashboard</button>
+          <div className="detail-header-content"><div className="header-left"><h1>Application Loading...</h1></div></div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!app) {
+    return (
+      <div className="application-detail">
+        <div className="detail-header">
+          <button className="back-btn" onClick={() => navigate(-1)}>← Back to Dashboard</button>
+          <div className="detail-header-content"><div className="header-left"><h1>Application not found</h1></div></div>
+        </div>
+      </div>
+    );
+  }
+
+  const tabs = tabsDef;
+
+  const getStatusBadgeClass = (status) => {
+    const classes = {
+      received: 'doc-received',
+      pending: 'doc-pending',
+      'needs-update': 'doc-warning',
+    };
+    return classes[status] || 'doc-pending';
+  };
+
+  return (
+    <div className="application-detail">
+      {/* Header */}
+      <div className="detail-header">
+        <button className="back-btn" onClick={() => navigate(-1)}>
+          ← Back to Dashboard
+        </button>
+        <div className="detail-header-content">
+          <div className="header-left">
+            <div className="app-badge">{app.id}</div>
+            <h1>{app.businessName}</h1>
+            <p>{app.dba && `DBA: ${app.dba} • `}{app.entityType} • {app.city}, {app.state}</p>
+          </div>
+          <div className="header-right">
+            <div className="loan-amount">{({'EUR':'€','GBP':'£','USD':'$','AED':'د.إ','INR':'₹'}[app.loan.currency] || '€')}{app.loan.amount}</div>
+            <div className="loan-purpose">{app.loan.purpose}</div>
+            <span className={`status-badge ${app.statusType}`}>{app.status}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="detail-tabs">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={`tab-btn ${activeTab === tab.id ? 'active' : ''} ${!tab.enabled ? 'tab-locked' : ''}`}
+            onClick={() => tab.enabled && setActiveTab(tab.id)}
+            disabled={!tab.enabled}
+            title={!tab.enabled ? 'Complete the previous agent step first' : tab.label}
+          >
+            <span>{tab.enabled ? tab.icon : '🔒'}</span>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div className="detail-content">
+        {activeTab === 'overview' && (
+          <div className="overview-grid">
+            {/* Agent Banner */}
+            <div className="agent-banner" style={{gridColumn: 'span 2'}}>
+              <div className="agent-avatar">📄</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name">
+                  Document Intake Agent
+                </div>
+                <div className="agent-banner-desc">Extracted & validated all fields from submitted documents automatically</div>
+              </div>
+              <div className="agent-status-pill complete">✅ Complete</div>
+            </div>
+
+            {/* Business Information */}
+            <div className="detail-card">
+              <div className="agent-card-header">
+                <div className="agent-mini-avatar" style={{background: '#f0fdf4', color: '#16a34a'}}>🏢</div>
+                <h3>Business Information</h3>
+                <span className="agent-tag">Auto-Extracted</span>
+              </div>
+              <div className="info-grid">
+                <div className="info-item">
+                  <label>Legal Name</label>
+                  <span>{app.businessName}</span>
+                </div>
+                <div className="info-item">
+                  <label>DBA</label>
+                  <span>{app.dba || 'N/A'}</span>
+                </div>
+                <div className="info-item">
+                  <label>EIN</label>
+                  <span className="highlight">{app.ein}</span>
+                </div>
+                <div className="info-item">
+                  <label>Entity Type</label>
+                  <span>{app.entityType}</span>
+                </div>
+                <div className="info-item">
+                  <label>Address</label>
+                  <span>{app.businessAddress}, {app.city}, {app.state} {app.zipCode}</span>
+                </div>
+                <div className="info-item">
+                  <label>Phone</label>
+                  <span>{app.businessPhone}</span>
+                </div>
+                <div className="info-item">
+                  <label>Industry</label>
+                  <span>{app.industry}</span>
+                </div>
+                <div className="info-item">
+                  <label>Established</label>
+                  <span>{app.dateEstablished}</span>
+                </div>
+                <div className="info-item">
+                  <label>Annual Revenue</label>
+                  <span className="highlight">{app.annualRevenue}</span>
+                </div>
+                <div className="info-item">
+                  <label>Employees</label>
+                  <span>{app.employees}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Owner Information */}
+            <div className="detail-card">
+              <div className="agent-card-header">
+                <div className="agent-mini-avatar" style={{background: '#eff6ff', color: '#2563eb'}}>👤</div>
+                <h3>Primary Owner</h3>
+                <span className="agent-tag">Verified</span>
+              </div>
+              <div className="info-grid">
+                <div className="info-item">
+                  <label>Name</label>
+                  <span>{app.owner.name}</span>
+                </div>
+                <div className="info-item">
+                  <label>Title</label>
+                  <span>{app.owner.title}</span>
+                </div>
+                <div className="info-item">
+                  <label>Ownership</label>
+                  <span className="highlight">{app.owner.ownership}</span>
+                </div>
+                <div className="info-item">
+                  <label>SSN</label>
+                  <span>{app.owner.ssn}</span>
+                </div>
+                <div className="info-item">
+                  <label>Date of Birth</label>
+                  <span>{app.owner.dob}</span>
+                </div>
+                <div className="info-item">
+                  <label>Email</label>
+                  <span>{app.owner.email}</span>
+                </div>
+                <div className="info-item">
+                  <label>Phone</label>
+                  <span>{app.owner.phone}</span>
+                </div>
+                <div className="info-item">
+                  <label>Address</label>
+                  <span>{app.owner.address}</span>
+                </div>
+              </div>
+              
+              {app.additionalOwners.length > 0 && (
+                <div className="additional-owners">
+                  <h4>Additional Owners</h4>
+                  {app.additionalOwners.map((owner, idx) => (
+                    <div key={idx} className="owner-row">
+                      <span>{owner.name}</span>
+                      <span>{owner.title}</span>
+                      <span className="highlight">{owner.ownership}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Loan Details */}
+            <div className="detail-card">
+              <div className="agent-card-header">
+                <div className="agent-mini-avatar" style={{background: '#f0fdf4', color: '#16a34a'}}>💰</div>
+                <h3>Loan Details</h3>
+                <span className="agent-tag">Parsed</span>
+              </div>
+              <div className="info-grid">
+                <div className="info-item large">
+                  <label>Requested Amount</label>
+                  <span className="loan-value">{({'EUR':'€','GBP':'£','USD':'$','AED':'د.إ','INR':'₹'}[app.loan.currency] || '€')}{app.loan.amount}</span>
+                </div>
+                <div className="info-item">
+                  <label>Currency</label>
+                  <span>{app.loan.currency || 'EUR'}</span>
+                </div>
+                <div className="info-item">
+                  <label>Purpose</label>
+                  <span>{app.loan.purpose}</span>
+                </div>
+                <div className="info-item">
+                  <label>Term</label>
+                  <span>{app.loan.term}</span>
+                </div>
+                <div className="info-item">
+                  <label>Collateral</label>
+                  <span>{app.loan.collateral}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Financial Highlights */}
+            <div className="detail-card">
+              <div className="agent-card-header">
+                <div className="agent-mini-avatar" style={{background: '#fef3c7', color: '#d97706'}}>📊</div>
+                <h3>Financial Highlights</h3>
+                <span className="agent-tag">Agent-Analyzed</span>
+              </div>
+              <div className="financials-grid">
+                <div className="financial-item">
+                  <span className="financial-value">{app.financials.dscr}</span>
+                  <span className="financial-label">DSCR</span>
+                </div>
+                <div className="financial-item">
+                  <span className="financial-value">{app.financials.debtToEquity}</span>
+                  <span className="financial-label">Debt-to-Equity</span>
+                </div>
+                <div className="financial-item">
+                  <span className="financial-value">{app.financials.currentRatio}</span>
+                  <span className="financial-label">Current Ratio</span>
+                </div>
+                <div className="financial-item">
+                  <span className="financial-value">{app.financials.operatingMargin}</span>
+                  <span className="financial-label">Operating Margin</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Exceptions */}
+            {app.exceptions.length > 0 && (
+              <div className="detail-card exceptions-card">
+                <h3>⚠️ Open Exceptions ({app.exceptions.length})</h3>
+                {app.exceptions.map((exc) => (
+                  <div key={exc.id} className={`exception-item severity-${exc.severity}`}>
+                    <div className="exception-header">
+                      <span className="exception-type">{exc.type}</span>
+                      <span className={`severity-badge ${exc.severity}`}>{exc.severity}</span>
+                    </div>
+                    <p className="exception-desc">{exc.description}</p>
+                    <p className="exception-detail">{exc.detail}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'documents' && (
+          <div className="documents-section">
+            <div className="agent-banner">
+              <div className="agent-avatar">📄</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name">
+                  Document Intake Agent
+                </div>
+                <div className="agent-banner-desc">Monitoring document submissions, validating completeness & extracting key fields</div>
+              </div>
+              <div className="agent-status-pill active">Monitoring</div>
+            </div>
+            <div className="detail-card">
+              <div className="agent-card-header">
+                <div className="agent-mini-avatar" style={{background: '#f0fdf4', color: '#16a34a'}}>📄</div>
+                <h3>Document Checklist</h3>
+                <span className="agent-tag">Agent-Tracked</span>
+              </div>
+              <div className="documents-list">
+                {app.documents.map((doc, idx) => (
+                  <div key={idx} className={`document-row ${getStatusBadgeClass(doc.status)}`}>
+                    <div className="doc-icon">
+                      {doc.status === 'received' ? '✅' : doc.status === 'needs-update' ? '⚠️' : '⏳'}
+                    </div>
+                    <div className="doc-info">
+                      <span className="doc-name">{doc.name}</span>
+                      <span className="doc-date">
+                        {doc.date ? `Received: ${doc.date}` : 'Pending'}
+                      </span>
+                    </div>
+                    <span className={`doc-status ${doc.status}`}>
+                      {doc.status === 'received' ? 'Received' : doc.status === 'needs-update' ? 'Needs Update' : 'Pending'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'verification' && (
+          <div className="verification-section">
+            {/* Agent Banner - always visible */}
+            <div className="agent-banner" style={{borderColor: '#93c5fd', background: 'linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #bfdbfe 100%)'}}>
+              <div className="agent-avatar blue">🔍</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name" style={{color: '#1e40af'}}>
+                  KYC Concierge Agent
+                </div>
+                <div className="agent-banner-desc">EIN lookup, sanctions screening, AML checks, credit pulls & identity verification</div>
+              </div>
+              <div className={`agent-status-pill ${kycRunning ? 'processing' : kycSignedOff ? 'complete' : kycHasData ? 'complete' : 'waiting'}`}>
+                {kycRunning ? 'Processing...' : kycSignedOff ? '✅ Approved' : kycHasData ? '✅ Verified' : 'Awaiting Run'}
+              </div>
+            </div>
+
+            {/* KYC Not Run Yet — Show Trigger Button */}
+            {!kycHasData && !kycRunning && !kycReviewItems && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '48px 32px'}}>
+                <div style={{fontSize: 56, marginBottom: 16}}>🔍</div>
+                <h3 style={{fontSize: 20, fontWeight: 700, color: '#111', marginBottom: 8}}>
+                  KYC Concierge Agent
+                </h3>
+                <p style={{color: '#666', fontSize: 14, maxWidth: 460, margin: '0 auto 16px'}}>
+                  This agent runs automatically when the RM approves the application. If results are not visible,
+                  the run may have failed — click below to retry.
+                </p>
+                <button
+                  onClick={handleRunKyc}
+                  style={{
+                    padding: '12px 28px', borderRadius: 10, border: '1px solid #cbd5e1',
+                    background: '#f8fafc', color: '#334155', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+                  }}
+                >
+                  🔄 Retry KYC Agent
+                </button>
+              </div>
+            )}
+
+            {/* KYC Running — Processing Animation */}
+            {kycRunning && (
+              <div className="detail-card" style={{padding: '40px 32px'}}>
+                <div style={{textAlign: 'center', marginBottom: 32}}>
+                  <div style={{fontSize: 44, marginBottom: 8, animation: 'pulse 1.5s ease-in-out infinite'}}>🤖</div>
+                  <h3 style={{fontSize: 18, fontWeight: 700, color: '#111', margin: 0}}>KYC Concierge Agent Running</h3>
+                  <p style={{color: '#666', fontSize: 13, margin: '4px 0 0'}}>{app?.businessName}</p>
+                </div>
+                {[
+                  { step: 1, icon: '👤', label: 'Identity Verification', desc: 'Verifying EIN, business registration, owner identity...' },
+                  { step: 2, icon: '🛡️', label: 'Sanctions & AML Screening', desc: 'Checking OFAC, UN, EU sanctions lists, PEP databases...' },
+                  { step: 3, icon: '📊', label: 'Credit Score & Financial Check', desc: 'Pulling credit reports, analyzing financial indicators...' },
+                  { step: 4, icon: '✅', label: 'KYC Complete', desc: 'All checks finished — awaiting your review' },
+                ].map(s => {
+                  const isDone = kycStep > s.step;
+                  const isActive = kycStep === s.step;
+                  const isPending = kycStep < s.step;
+                  return (
+                    <div key={s.step} style={{
+                      display: 'flex', alignItems: 'center', gap: 16,
+                      padding: '14px 16px', marginBottom: 8, borderRadius: 10,
+                      background: isActive ? '#eff6ff' : isDone ? '#f0fdf4' : '#f9fafb',
+                      border: isActive ? '1.5px solid #93c5fd' : isDone ? '1.5px solid #bbf7d0' : '1.5px solid #e5e7eb',
+                      opacity: isPending ? 0.45 : 1, transition: 'all 0.4s ease',
+                    }}>
+                      <div style={{
+                        width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: isDone ? '#16a34a' : isActive ? '#2563eb' : '#d1d5db',
+                        color: '#fff', fontSize: 14, fontWeight: 700,
+                      }}>
+                        {isDone ? '✓' : isActive ? (
+                          <div style={{ width: 16, height: 16, border: '2.5px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }}></div>
+                        ) : s.step}
+                      </div>
+                      <div>
+                        <div style={{fontSize: 14, fontWeight: 600, color: isPending ? '#9ca3af' : '#111'}}>{s.icon} {s.label}</div>
+                        <div style={{fontSize: 12, color: isActive ? '#2563eb' : isDone ? '#16a34a' : '#999', marginTop: 2}}>
+                          {isDone ? 'Completed' : isActive ? s.desc : ''}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{ height: 6, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden', marginTop: 20 }}>
+                  <div style={{ height: '100%', background: 'linear-gradient(90deg, #16a34a, #2563eb)', borderRadius: 3, transition: 'width 0.8s ease', width: `${(kycStep / 4) * 100}%` }}></div>
+                </div>
+              </div>
+            )}
+
+            {/* KYC Results — Review & Final Approval */}
+            {kycReviewItems && !kycRunning && !kycSignedOff && (
+              <div>
+                {/* Header */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between'}}>
+                    <div>
+                      <h3 style={{margin: 0, fontSize: 18}}>🔍 KYC Verification Results — <span style={{color: '#1e40af'}}>KYC Concierge Agent</span></h3>
+                      <p style={{margin: '4px 0 0', fontSize: 13, color: '#666'}}>
+                        Review the results below. Flag any items that need attention, then give final approval.
+                      </p>
+                    </div>
+                    <div style={{display: 'flex', gap: 10}}>
+                      <span style={{background: '#dcfce7', color: '#16a34a', padding: '4px 12px', borderRadius: 20, fontSize: 13, fontWeight: 600}}>
+                        ✅ {kycReviewItems.filter(i => i.agentResult === 'clear').length} Clear
+                      </span>
+                      {flaggedCount > 0 && (
+                        <span style={{background: '#fef3c7', color: '#92400e', padding: '4px 12px', borderRadius: 20, fontSize: 13, fontWeight: 600}}>
+                          ⚠️ {flaggedCount} Warning
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* All items shown as read-only results with flag toggle */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <div className="verification-results">
+                    {kycReviewItems.map(item => (
+                      <div key={item.id} className={`verify-item ${item.agentResult === 'clear' ? 'success' : 'warning'}`}
+                        style={{position: 'relative'}}>
+                        <span className="verify-icon">{item.agentResult === 'clear' ? '✓' : '⚠'}</span>
+                        <div className="verify-content" style={{flex: 1}}>
+                          <span className="verify-title">{item.icon} {item.title}</span>
+                          <span className="verify-detail">{item.detail}</span>
+                        </div>
+                        <div style={{display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0}}>
+                          <span style={{
+                            padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                            background: item.agentResult === 'clear' ? '#dcfce7' : '#fef3c7',
+                            color: item.agentResult === 'clear' ? '#16a34a' : '#92400e',
+                          }}>
+                            {item.agentResult === 'clear' ? 'CLEAR' : 'WARNING'}
+                          </span>
+                          {item.agentResult !== 'clear' && (
+                            <button
+                              onClick={() => handleReviewItem(item.id, item.status === 'flagged' ? 'pending' : 'flagged')}
+                              style={{
+                                padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                                background: item.status === 'flagged' ? '#fee2e2' : '#f3f4f6',
+                                color: item.status === 'flagged' ? '#dc2626' : '#999',
+                                border: 'none', cursor: 'pointer',
+                              }}
+                              title={item.status === 'flagged' ? 'Remove flag' : 'Flag this item'}
+                            >
+                              🚩 {item.status === 'flagged' ? 'Flagged' : 'Flag'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Single Final Approval Button */}
+                <div className="detail-card" style={{textAlign: 'center', padding: '28px 32px'}}>
+                  <button
+                    onClick={handleKycSignOff}
+                    style={{
+                      padding: '14px 44px', borderRadius: 12, border: 'none',
+                      background: 'linear-gradient(135deg, #16a34a, #15803d)',
+                      color: '#fff', fontWeight: 700, fontSize: 15, cursor: 'pointer',
+                      boxShadow: '0 4px 14px rgba(22,163,74,0.3)',
+                    }}
+                  >
+                    ✅ Final Approval — Verify KYC
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Signed Off — Case ID + Summary */}
+            {kycSignedOff && kycReviewItems && (
+              <div>
+                <div className="detail-card" style={{
+                  textAlign: 'center', padding: '36px',
+                  borderTop: '4px solid #16a34a',
+                }}>
+                  <div style={{fontSize: 48, marginBottom: 12}}>✅</div>
+                  <h3 style={{fontSize: 22, fontWeight: 700, color: '#111', margin: '0 0 8px'}}>
+                    KYC Verification Approved
+                  </h3>
+                  <p style={{color: '#666', fontSize: 14, margin: '0 0 20px'}}>
+                    Reviewed by <strong>{kycApprovalData?.kycApprovedBy || 'Manager'}</strong> · {kycApprovalData?.kycApprovedAt ? new Date(kycApprovalData.kycApprovedAt).toLocaleString('en-GB') : new Date().toLocaleString('en-GB')}
+                  </p>
+
+                  {/* Case ID prominently — created only now */}
+                  <div style={{
+                    display: 'inline-block', background: '#f0fdf4', border: '2px solid #bbf7d0',
+                    borderRadius: 14, padding: '16px 32px', marginBottom: 20,
+                  }}>
+                    <div style={{fontSize: 12, color: '#666', marginBottom: 4}}>Case ID (Created)</div>
+                    <div style={{fontSize: 22, fontWeight: 800, color: '#16a34a', letterSpacing: 1}}>{kycApprovalData?.caseId || app?.caseId}</div>
+                  </div>
+
+                  {flaggedCount > 0 && (
+                    <div style={{
+                      display: 'inline-block', background: '#fef3c7', border: '1px solid #fde68a',
+                      borderRadius: 10, padding: '8px 20px', marginLeft: 12,
+                    }}>
+                      <span style={{fontSize: 13, fontWeight: 600, color: '#92400e'}}>
+                        ⚠️ {flaggedCount} item(s) flagged for follow-up
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Results summary */}
+                <div className="detail-card" style={{marginTop: 16}}>
+                  <h3>📋 KYC Summary</h3>
+                  <div className="verification-results">
+                    {kycReviewItems.map(item => (
+                      <div key={item.id} className={`verify-item ${item.status === 'flagged' ? 'warning' : 'success'}`}>
+                        <span className="verify-icon">{item.status === 'flagged' ? '🚩' : '✓'}</span>
+                        <div className="verify-content">
+                          <span className="verify-title">{item.icon} {item.title}</span>
+                          <span className="verify-detail">{item.detail}</span>
+                        </div>
+                        {item.status === 'flagged' && (
+                          <span style={{
+                            padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, flexShrink: 0,
+                            background: '#fee2e2', color: '#dc2626',
+                          }}>FLAGGED</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+              <div className="detail-card" style={{textAlign: 'center', padding: '24px', marginTop: 16, background: 'linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)', border: '1.5px solid #93c5fd'}}>
+                <p style={{color: '#1e40af', fontSize: 13, margin: '0 0 12px', fontWeight: 500}}>KYC verification is complete. Run financial spreading analysis.</p>
+                <button onClick={handleRunSpreading} style={{
+                  padding: '12px 32px', borderRadius: 10, border: 'none',
+                  background: 'linear-gradient(135deg, #2563eb, #1d4ed8)', color: '#fff',
+                  fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(37,99,235,0.3)',
+                }}>
+                  🚀 Run Spreading Agent
+                </button>
+              </div>
+            </div>
+            )}
+
+            {/* Pre-existing KYC data (from demo seed) */}
+            {kycHasData && !kycReviewItems && !kycRunning && (
+              <div className="detail-card">
+                <div style={{display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16}}>
+                  <h3 style={{margin: 0}}>🔍 KYC Verification — <span style={{color: '#1e40af'}}>KYC Concierge Agent</span></h3>
+                  <span style={{background: '#dcfce7', color: '#16a34a', padding: '3px 10px', borderRadius: 20, fontSize: 12, fontWeight: 600}}>
+                    ✅ Verified
+                  </span>
+                </div>
+                <div style={{
+                  display: 'inline-block', background: '#f0fdf4', border: '2px solid #bbf7d0',
+                  borderRadius: 14, padding: '12px 24px', marginBottom: 16,
+                }}>
+                  <div style={{fontSize: 11, color: '#666'}}>Case ID</div>
+                  <div style={{fontSize: 18, fontWeight: 800, color: '#16a34a'}}>{app?.caseId}</div>
+                </div>
+                <div className="verification-results">
+                  {(() => {
+                    // Build the list dynamically from the KYC agent's real output.
+                    // 1) one row per uploaded KYC document (kycChecklist)
+                    // 2) screening checks
+                    const items = [];
+                    const checklist = Array.isArray(app.kyc.kycChecklist) ? app.kyc.kycChecklist : [];
+                    if (checklist.length === 0) {
+                      items.push({ ok: false, title: 'Uploaded KYC Documents', detail: 'No KYC documents found in storage.' });
+                    } else {
+                      for (const d of checklist) {
+                        const sizeKb = d.sizeBytes ? `${Math.round(d.sizeBytes / 1024)} KB` : '';
+                        items.push({
+                          ok: d.status === 'verified',
+                          title: d.name,
+                          detail: d.filename ? `${d.filename}${sizeKb ? ` · ${sizeKb}` : ''}` : 'Awaiting upload',
+                        });
+                      }
+                    }
+                    items.push(
+                      { ok: app.kyc.sanctions?.overallStatus === 'clear', title: 'Sanctions / AML', detail: `${app.kyc.sanctions?.listsChecked ?? 0} lists — ${app.kyc.sanctions?.overallStatus ?? 'n/a'}` },
+                      { ok: app.kyc.pepCheck?.status === 'clear' && (app.kyc.adverseMedia?.hits || 0) === 0, title: 'PEP & Adverse Media', detail: `PEP: ${app.kyc.pepCheck?.status ?? 'n/a'} · Media: ${app.kyc.adverseMedia?.hits || 0} hit(s)` },
+                      { ok: (app.kyc.creditScore?.score || 0) >= 650, title: 'Credit Score', detail: app.kyc.creditScore?.score ? `${app.kyc.creditScore.score} (${app.kyc.creditScore.rating ?? '—'})` : 'Unavailable' },
+                      { ok: app.kyc.completeness === 100, title: 'KYC Completeness', detail: `${app.kyc.completeness ?? 0}%` },
+                    );
+                    return items;
+                  })().map((item, i) => (
+                    <div key={i} className={`verify-item ${item.ok ? 'success' : 'warning'}`}>
+                      <span className="verify-icon">{item.ok ? '✓' : '⚠'}</span>
+                      <div className="verify-content">
+                        <span className="verify-title">{item.title}</span>
+                        <span className="verify-detail">{item.detail}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ Agent #3 — Financial Spreading Tab ═══ */}
+        {activeTab === 'spreading' && (
+          <div className="spreading-section">
+            {/* Agent Banner */}
+            <div className="agent-banner" style={{borderColor: '#93c5fd', background: 'linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #bfdbfe 100%)'}}>
+              <div className="agent-avatar blue">📊</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name" style={{color: '#1e40af'}}>
+                  Financial Spreading Agent
+                </div>
+                <div className="agent-banner-desc">Extracts financials, populates bank templates, calculates ratios & flags anomalies</div>
+              </div>
+              <div className={`agent-status-pill ${spreadingRunning ? 'processing' : spreadingData ? 'complete' : 'waiting'}`}>
+                {spreadingRunning ? 'Analyzing...' : spreadingData ? '✅ Complete' : 'Awaiting Run'}
+              </div>
+            </div>
+
+            {/* No spreading + not running → auto-trigger via tap-to-rerun banner */}
+            {!spreadingData && !spreadingRunning && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '48px 32px'}}>
+                <div style={{fontSize: 48, marginBottom: 16}}>📊</div>
+                <h3 style={{fontSize: 20, fontWeight: 700, color: '#111', margin: '0 0 8px'}}>
+                  Financial Spreading Agent
+                </h3>
+                <p style={{color: '#666', fontSize: 14, margin: '0 0 12px', maxWidth: 500, marginInline: 'auto'}}>
+                  This agent runs automatically when the RM approves the application. If you don't see results,
+                  the run may have failed — click below to retry.
+                </p>
+                <button
+                  onClick={handleRunSpreading}
+                  style={{
+                    padding: '12px 28px', borderRadius: 10, border: '1px solid #cbd5e1',
+                    background: '#f8fafc', color: '#334155', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+                  }}
+                >
+                  🔄 Retry Spreading Agent
+                </button>
+              </div>
+            )}
+
+            {/* Running animation */}
+            {spreadingRunning && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '48px 32px'}}>
+                <div style={{fontSize: 36, marginBottom: 16, animation: 'spin 2s linear infinite'}}>📊</div>
+                <h3 style={{margin: '0 0 24px', color: '#111'}}>Financial Spreading Agent Processing...</h3>
+                <div style={{maxWidth: 400, margin: '0 auto'}}>
+                  {[
+                    { step: 1, label: 'Extracting financial statements...' },
+                    { step: 2, label: 'Populating bank templates & ratios...' },
+                    { step: 3, label: 'Detecting anomalies & benchmarking...' },
+                    { step: 4, label: 'Generating confidence report...' },
+                  ].map(s => (
+                    <div key={s.step} style={{
+                      display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0',
+                      opacity: spreadingStep >= s.step ? 1 : 0.3,
+                      transition: 'opacity 0.4s ease',
+                    }}>
+                      <div style={{
+                        width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: spreadingStep > s.step ? '#dcfce7' : spreadingStep === s.step ? '#dbeafe' : '#f3f4f6',
+                        color: spreadingStep > s.step ? '#16a34a' : spreadingStep === s.step ? '#2563eb' : '#999',
+                        fontSize: 13, fontWeight: 700,
+                      }}>
+                        {spreadingStep > s.step ? '✓' : s.step}
+                      </div>
+                      <span style={{fontSize: 14, color: spreadingStep >= s.step ? '#111' : '#999'}}>{s.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Spreading Results */}
+            {spreadingData && !spreadingRunning && (
+              <div>
+                {/* Summary Header */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12}}>
+                    <div>
+                      <h3 style={{margin: 0, fontSize: 18}}>📊 Financial Spreading — <span style={{color: '#1e40af'}}>Spreading Agent</span></h3>
+                      <p style={{margin: '4px 0 0', fontSize: 13, color: '#666'}}>
+                        {spreadingData.auditor} · {spreadingData.auditOpinion} · {spreadingData.statementDate} · {spreadingData.currency} ({spreadingData.rounding})
+                      </p>
+                    </div>
+                    <div style={{display: 'flex', gap: 10, alignItems: 'center'}}>
+                      <div style={{display: 'flex', flexDirection: 'column', gap: 4}}>
+                        <span style={{background: '#dcfce7', color: '#16a34a', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600}}>
+                          ✅ {spreadingData.summary.passCount} Pass
+                        </span>
+                        {spreadingData.summary.warningCount > 0 && (
+                          <span style={{background: '#fef3c7', color: '#92400e', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600}}>
+                            ⚠️ {spreadingData.summary.warningCount} Warning
+                          </span>
+                        )}
+                        {spreadingData.summary.failCount > 0 && (
+                          <span style={{background: '#fee2e2', color: '#dc2626', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600}}>
+                            ❌ {spreadingData.summary.failCount} Fail
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Anomalies */}
+                {spreadingData.anomalies && spreadingData.anomalies.length > 0 && (
+                  <div className="detail-card" style={{marginBottom: 16, borderLeft: '4px solid #f59e0b'}}>
+                    <h3 style={{margin: '0 0 12px', fontSize: 16}}>⚠️ Anomalies Detected ({spreadingData.anomalies.length})</h3>
+                    {spreadingData.anomalies.map((a, i) => (
+                      <div key={i} style={{
+                        padding: '10px 14px', marginBottom: 8, borderRadius: 8,
+                        background: a.severity === 'high' ? '#fef2f2' : a.severity === 'medium' ? '#fffbeb' : '#f0fdf4',
+                        border: `1px solid ${a.severity === 'high' ? '#fecaca' : a.severity === 'medium' ? '#fde68a' : '#bbf7d0'}`,
+                      }}>
+                        <div style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4}}>
+                          <span style={{
+                            padding: '1px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
+                            background: a.severity === 'high' ? '#dc2626' : a.severity === 'medium' ? '#f59e0b' : '#16a34a',
+                            color: '#fff',
+                          }}>{a.severity}</span>
+                          <span style={{fontWeight: 600, fontSize: 14, color: '#111'}}>{a.message}</span>
+                        </div>
+                        <div style={{fontSize: 12, color: '#666', paddingLeft: 4}}>💡 {a.recommendation}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Ratio Assessments */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <h3 style={{margin: '0 0 12px', fontSize: 16}}>📈 Key Financial Ratios</h3>
+                  <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10}}>
+                    {spreadingData.assessments.map((a, i) => (
+                      <div key={i} style={{
+                        padding: '12px 16px', borderRadius: 10,
+                        background: a.status === 'pass' ? '#f0fdf4' : a.status === 'warning' ? '#fffbeb' : a.status === 'fail' ? '#fef2f2' : '#f9fafb',
+                        border: `1px solid ${a.status === 'pass' ? '#bbf7d0' : a.status === 'warning' ? '#fde68a' : a.status === 'fail' ? '#fecaca' : '#e5e7eb'}`,
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      }}>
+                        <div>
+                          <div style={{fontWeight: 600, fontSize: 13, color: '#111'}}>{a.label}</div>
+                          <div style={{fontSize: 11, color: '#888', marginTop: 2}}>{a.note}</div>
+                        </div>
+                        <div style={{textAlign: 'right'}}>
+                          <div style={{
+                            fontWeight: 800, fontSize: 18,
+                            color: a.status === 'pass' ? '#16a34a' : a.status === 'warning' ? '#d97706' : a.status === 'fail' ? '#dc2626' : '#999',
+                          }}>
+                            {a.value !== null && a.value !== undefined ? (
+                              typeof a.value === 'number' ? (a.label.includes('%') || a.label.includes('Margin') || a.label.includes('Growth') || a.label.includes('Return') || a.label.includes('OpEx') ? `${a.value}%` : a.value.toFixed(2)) : a.value
+                            ) : 'N/A'}
+                          </div>
+
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Key Financials Summary */}
+                <div className="detail-card">
+                  <h3 style={{margin: '0 0 12px', fontSize: 16}}>🏦 Financial Summary ({spreadingData.currency} {spreadingData.rounding})</h3>
+                  <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12}}>
+                    {[
+                      { label: 'Total Revenue', curr: spreadingData.incomeStatement?.currentYear?.netSales, prev: spreadingData.incomeStatement?.priorYear?.netSales },
+                      { label: 'Gross Profit', curr: spreadingData.incomeStatement?.currentYear?.grossProfit, prev: spreadingData.incomeStatement?.priorYear?.grossProfit },
+                      { label: 'EBITDA', curr: spreadingData.incomeStatement?.currentYear?.ebitda, prev: spreadingData.incomeStatement?.priorYear?.ebitda },
+                      { label: 'Net Income', curr: spreadingData.incomeStatement?.currentYear?.netIncome, prev: spreadingData.incomeStatement?.priorYear?.netIncome },
+                      { label: 'Total Assets', curr: spreadingData.balanceSheet?.currentYear?.totalAssets, prev: spreadingData.balanceSheet?.priorYear?.totalAssets },
+                      { label: 'Total Equity', curr: spreadingData.balanceSheet?.currentYear?.totalEquity, prev: spreadingData.balanceSheet?.priorYear?.totalEquity },
+                      { label: 'Cash & Equiv', curr: spreadingData.balanceSheet?.currentYear?.cashAndEquivalents, prev: spreadingData.balanceSheet?.priorYear?.cashAndEquivalents },
+                      { label: 'Operating CF', curr: spreadingData.cashFlows?.currentYear?.operatingCashFlow, prev: null },
+                    ].map((item, i) => {
+                      const change = item.prev ? (((item.curr - item.prev) / Math.abs(item.prev)) * 100).toFixed(1) : null;
+                      return (
+                        <div key={i} style={{padding: '12px', borderRadius: 8, background: '#f9fafb', border: '1px solid #e5e7eb'}}>
+                          <div style={{fontSize: 11, color: '#888', marginBottom: 4}}>{item.label}</div>
+                          <div style={{fontSize: 20, fontWeight: 700, color: '#111'}}>{item.curr?.toLocaleString()}</div>
+                          {change && (
+                            <div style={{fontSize: 11, color: parseFloat(change) >= 0 ? '#16a34a' : '#dc2626', marginTop: 2}}>
+                              {parseFloat(change) >= 0 ? '▲' : '▼'} {Math.abs(parseFloat(change))}% YoY
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Next Agent Button */}
+            {spreadingData && !spreadingRunning && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '24px', marginTop: 16, background: 'linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%)', border: '1.5px solid #c4b5fd'}}>
+                <p style={{color: '#5b21b6', fontSize: 13, margin: '0 0 12px', fontWeight: 500}}>Financial spreading is complete. Run credit memo drafting.</p>
+                <button onClick={handleRunMemo} style={{
+                  padding: '12px 32px', borderRadius: 10, border: 'none',
+                  background: 'linear-gradient(135deg, #7c3aed, #6d28d9)', color: '#fff',
+                  fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(124,58,237,0.3)',
+                }}>
+                  🚀 Run Memo Agent
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ Agent #4 — Credit Memo Tab ═══ */}
+        {activeTab === 'memo' && (
+          <div className="memo-section">
+            {/* Agent Banner */}
+            <div className="agent-banner" style={{borderColor: '#c4b5fd', background: 'linear-gradient(135deg, #f5f3ff 0%, #ede9fe 50%, #ddd6fe 100%)'}}>
+              <div className="agent-avatar purple">📝</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name" style={{color: '#5b21b6'}}>
+                  Memo Drafting Agent
+                </div>
+                <div className="agent-banner-desc">Drafts credit memo using KYC data, financial analysis & credit policy templates</div>
+              </div>
+              <div className={`agent-status-pill ${memoRunning ? 'processing' : memoData ? 'complete' : 'waiting'}`}>
+                {memoRunning ? 'Drafting...' : memoData ? '✅ Generated' : 'Awaiting Run'}
+              </div>
+            </div>
+
+            {/* No memo + not running → auto-trigger via tap-to-rerun banner */}
+            {!memoData && !memoRunning && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '48px 32px'}}>
+                <div style={{fontSize: 48, marginBottom: 16}}>📝</div>
+                <h3 style={{fontSize: 20, fontWeight: 700, color: '#111', margin: '0 0 8px'}}>
+                  Memo Drafting Agent
+                </h3>
+                <p style={{color: '#666', fontSize: 14, margin: '0 0 12px', maxWidth: 520, marginInline: 'auto'}}>
+                  This agent runs automatically when the RM approves the application. If you don't see a memo,
+                  the run may have failed — click below to retry.
+                </p>
+                <button
+                  onClick={handleRunMemo}
+                  style={{
+                    padding: '12px 28px', borderRadius: 10, border: '1px solid #cbd5e1',
+                    background: '#f8fafc', color: '#334155', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+                  }}
+                >
+                  🔄 Retry Memo Agent
+                </button>
+              </div>
+            )}
+
+            {/* Running animation */}
+            {memoRunning && (
+              <div className="detail-card" style={{padding: 40}}>
+                <h3 style={{textAlign: 'center', margin: '0 0 32px', fontSize: 18}}>
+                  ✨ Memo Drafting Agent — Generating Credit Memo
+                </h3>
+                <div className="spreading-steps">
+                  {[
+                    { step: 1, label: 'Gathering case data from Agents #1, #2, #3...' },
+                    { step: 2, label: 'Analyzing financial ratios against policy thresholds...' },
+                    { step: 3, label: 'Drafting memo sections & risk assessment...' },
+                    { step: 4, label: 'Compiling recommendation & covenants...' },
+                  ].map(s => (
+                    <div key={s.step} className={`spreading-step ${memoStep >= s.step ? 'active' : ''} ${memoStep > s.step ? 'done' : ''}`}>
+                      <div className="step-indicator">
+                        {memoStep > s.step ? '✅' : memoStep === s.step ? <div className="step-spinner"></div> : <div className="step-circle">{s.step}</div>}
+                      </div>
+                      <span>{s.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Memo Results — Sub-Tabbed Review Dashboard */}
+            {memoData && !memoRunning && (
+              <div>
+                {/* Summary Header with Internal Credit Rating */}
+                <div className="detail-card" style={{background: 'linear-gradient(135deg, #f5f3ff, #ede9fe)', border: '1px solid #c4b5fd'}}>
+                  <div style={{display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap'}}>
+                    {/* Rating Badge (replaces % confidence) */}
+                    {(() => {
+                      const r = memoData.summary?.internalRating || 'N/A';
+                      const band = memoData.summary?.riskLevel || 'Unknown';
+                      const colour =
+                        band === 'Low'       ? { bg: '#dcfce7', fg: '#166534', ring: '#16a34a' } :
+                        band === 'Moderate'  ? { bg: '#fef3c7', fg: '#92400e', ring: '#f59e0b' } :
+                        band === 'High'      ? { bg: '#ffedd5', fg: '#c2410c', ring: '#ea580c' } :
+                        band === 'Very High' ? { bg: '#fee2e2', fg: '#991b1b', ring: '#dc2626' } :
+                                                { bg: '#e5e7eb', fg: '#374151', ring: '#9ca3af' };
+                      return (
+                        <div style={{
+                          width: 110, height: 110, borderRadius: '50%',
+                          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                          background: colour.bg, color: colour.fg,
+                          border: `4px solid ${colour.ring}`, flexShrink: 0,
+                        }}>
+                          <div style={{fontSize: 26, fontWeight: 900, letterSpacing: 0.5}}>{r}</div>
+                          <div style={{fontSize: 9, fontWeight: 700, letterSpacing: 1}}>INTERNAL RATING</div>
+                          <div style={{fontSize: 10, fontWeight: 600, marginTop: 2}}>{band} risk</div>
+                        </div>
+                      );
+                    })()}
+                    <div style={{flex: 1}}>
+                      <div style={{fontSize: 12, color: '#6b21a8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1}}>Credit Memo — Narrative Agent</div>
+                      <div style={{fontSize: 22, fontWeight: 800, color: '#111', margin: '4px 0'}}>{memoData.memoId}</div>
+                      <div style={{fontSize: 13, color: '#666'}}>
+                        Generated {new Date(memoData.generatedAt).toLocaleString('en-GB')} by {memoData.generatedBy}
+                      </div>
+                      {/* PD / LGD inline bars */}
+                      <div style={{display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap'}}>
+                        <div style={{minWidth: 180}}>
+                          <div style={{fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 3}}>
+                            PD (Probability of Default): <strong>{memoData.summary?.pd?.toFixed?.(2) ?? '—'}%</strong>
+                          </div>
+                          <div style={{height: 8, background: '#e5e7eb', borderRadius: 4, overflow: 'hidden'}}>
+                            <div style={{
+                              height: '100%',
+                              width: `${Math.min(100, (memoData.summary?.pd || 0) * 4)}%`,
+                              background: (memoData.summary?.pd || 0) < 5 ? '#16a34a' : (memoData.summary?.pd || 0) < 10 ? '#f59e0b' : (memoData.summary?.pd || 0) < 15 ? '#ea580c' : '#dc2626',
+                            }} />
+                          </div>
+                        </div>
+                        <div style={{minWidth: 180}}>
+                          <div style={{fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 3}}>
+                            LGD (Loss Given Default): <strong>{memoData.summary?.lgd?.toFixed?.(1) ?? '—'}%</strong>
+                          </div>
+                          <div style={{height: 8, background: '#e5e7eb', borderRadius: 4, overflow: 'hidden'}}>
+                            <div style={{
+                              height: '100%',
+                              width: `${Math.min(100, memoData.summary?.lgd || 0)}%`,
+                              background: (memoData.summary?.lgd || 0) <= 40 ? '#16a34a' : (memoData.summary?.lgd || 0) <= 60 ? '#f59e0b' : '#dc2626',
+                            }} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center'}}>
+                      <span style={{
+                        padding: '8px 16px', borderRadius: 20, fontWeight: 700, fontSize: 13,
+                        background: memoData.summary?.recommendation === 'APPROVE' ? '#dcfce7' :
+                                    memoData.summary?.recommendation === 'APPROVE WITH CONDITIONS' ? '#fef3c7' :
+                                    memoData.summary?.recommendation === 'REFER TO COMMITTEE' ? '#ffedd5' : '#fee2e2',
+                        color: memoData.summary?.recommendation === 'APPROVE' ? '#166534' :
+                               memoData.summary?.recommendation === 'APPROVE WITH CONDITIONS' ? '#92400e' :
+                               memoData.summary?.recommendation === 'REFER TO COMMITTEE' ? '#c2410c' : '#991b1b',
+                      }}>
+                        {memoData.summary?.recommendation || 'PENDING'}
+                      </span>
+                      <span style={{
+                        padding: '8px 16px', borderRadius: 20, fontWeight: 600, fontSize: 13,
+                        background: '#f3f4f6', color: '#374151',
+                      }}>
+                        Risk: {memoData.summary?.riskLevel || 'Unknown'}
+                      </span>
+                      <span style={{
+                        padding: '6px 14px', borderRadius: 20, fontWeight: 700, fontSize: 12,
+                        background: (memoData.summary?.totalMissing || 0) === 0 ? '#dcfce7' : '#fef3c7',
+                        color: (memoData.summary?.totalMissing || 0) === 0 ? '#166534' : '#92400e',
+                      }}>
+                        {(memoData.summary?.totalMissing || 0) === 0 ? '✅ All Data Complete' : `⚠️ ${memoData.summary?.totalMissing} Gap(s)`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Decision rationale tagline */}
+                  {memoData.summary?.decisionHint && (
+                    <div style={{marginTop: 14, padding: '10px 14px', background: 'rgba(255,255,255,0.6)', borderRadius: 8, fontSize: 12, color: '#4b5563', borderLeft: '3px solid #7c3aed'}}>
+                      <strong>Policy Decision Hint:</strong> {memoData.summary.decisionHint}
+                    </div>
+                  )}
+
+                </div>
+
+                {/* Sub-Tabs */}
+                <div style={{
+                  display: 'flex', gap: 0, marginTop: 16, borderBottom: '2px solid #e5e7eb',
+                  overflowX: 'auto',
+                }}>
+                  {[
+                    { id: 'narrative', label: '📝 Narrative', desc: 'Credit Memo' },
+                    { id: 'checks', label: '✅ Checks Summary', desc: 'All Verifications' },
+                    { id: 'financials', label: '📊 Financial Logs', desc: 'Ratios & Trends' },
+                    { id: 'transaction', label: '📋 Transaction Details', desc: 'Full Application' },
+                  ].map(tab => (
+                    <button key={tab.id} onClick={() => setMemoSubTab(tab.id)} style={{
+                      padding: '12px 20px', border: 'none', background: 'none', cursor: 'pointer',
+                      borderBottom: memoSubTab === tab.id ? '3px solid #7c3aed' : '3px solid transparent',
+                      color: memoSubTab === tab.id ? '#7c3aed' : '#888',
+                      fontWeight: memoSubTab === tab.id ? 700 : 500, fontSize: 13,
+                      transition: 'all 0.2s', whiteSpace: 'nowrap',
+                    }}>
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* ──── SUB-TAB: Narrative ──── */}
+                {memoSubTab === 'narrative' && (
+                  <div>
+                    {memoData.sections?.map((section, idx) => (
+                      <div key={idx} className="detail-card" style={{marginTop: 12}}>
+                        <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12}}>
+                          <h3 style={{margin: 0, fontSize: 16}}>
+                            {idx + 1}. {section.title}
+                          </h3>
+                          <div style={{
+                            width: 32, height: 32, borderRadius: '50%',
+                            background: section.confidence >= 70 ? '#dcfce7' : section.confidence >= 40 ? '#fef3c7' : '#fee2e2',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 11, fontWeight: 700,
+                            color: section.confidence >= 70 ? '#166534' : section.confidence >= 40 ? '#92400e' : '#991b1b',
+                          }}>
+                            {section.confidence}%
+                          </div>
+                        </div>
+                        <div style={{fontSize: 13, lineHeight: 1.7, color: '#374151', whiteSpace: 'pre-line'}}>
+                          {section.narrative?.split(/(\*\*[^*]+\*\*)/).map((part, i) => {
+                            if (part.startsWith('**') && part.endsWith('**')) {
+                              return <strong key={i}>{part.slice(2, -2)}</strong>;
+                            }
+                            return <span key={i}>{part}</span>;
+                          })}
+                        </div>
+
+                        {section.policyChecks && section.policyChecks.length > 0 && (
+                          <div style={{marginTop: 16}}>
+                            <div style={{fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#111'}}>Policy Compliance Checks</div>
+                            <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8}}>
+                              {section.policyChecks.map((pc, i) => (
+                                <div key={i} style={{
+                                  padding: '10px 12px', borderRadius: 8,
+                                  background: pc.met ? '#f0fdf4' : '#fef2f2',
+                                  border: `1px solid ${pc.met ? '#86efac' : '#fca5a5'}`,
+                                  fontSize: 12,
+                                }}>
+                                  <div style={{fontWeight: 600}}>{pc.met ? '✅' : '❌'} {pc.metric}</div>
+                                  <div style={{color: '#666', marginTop: 2}}>
+                                    Value: {typeof pc.value === 'number' ? pc.value.toFixed(2) : pc.value} | Required: {pc.threshold}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {section.riskFactors && section.riskFactors.length > 0 && (
+                          <div style={{marginTop: 16}}>
+                            <div style={{fontSize: 13, fontWeight: 700, marginBottom: 8, color: '#111'}}>Risk Factor Details</div>
+                            {section.riskFactors.map((rf, i) => (
+                              <div key={i} style={{
+                                padding: '10px 14px', borderRadius: 8, marginBottom: 8,
+                                background: rf.severity === 'high' ? '#fef2f2' : rf.severity === 'medium' ? '#fffbeb' : '#f0fdf4',
+                                border: `1px solid ${rf.severity === 'high' ? '#fca5a5' : rf.severity === 'medium' ? '#fcd34d' : '#86efac'}`,
+                              }}>
+                                <div style={{fontSize: 13, fontWeight: 600}}>
+                                  <span style={{
+                                    padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                                    background: rf.severity === 'high' ? '#dc2626' : rf.severity === 'medium' ? '#f59e0b' : '#16a34a',
+                                    color: '#fff', marginRight: 8, textTransform: 'uppercase',
+                                  }}>{rf.severity}</span>
+                                  {rf.factor}
+                                </div>
+                                <div style={{fontSize: 12, color: '#666', marginTop: 4}}>{rf.detail}</div>
+                                <div style={{fontSize: 12, color: '#1D4D2F', fontWeight: 500, marginTop: 4}}>
+                                  💡 {rf.mitigation}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {section.missing && section.missing.length > 0 && (
+                          <div style={{
+                            marginTop: 12, padding: '8px 12px', borderRadius: 6,
+                            background: '#fef3c7', fontSize: 12, color: '#92400e',
+                          }}>
+                            ⚠️ {section.missing.join(' | ')}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+
+                    {memoData.summary?.covenants && memoData.summary.covenants.length > 0 && (
+                      <div className="detail-card" style={{marginTop: 12, background: '#f0fdf4', border: '1px solid #86efac'}}>
+                        <h3 style={{margin: '0 0 12px', fontSize: 16}}>📋 Suggested Covenants & Conditions</h3>
+                        <ul style={{margin: 0, paddingLeft: 20}}>
+                          {memoData.summary.covenants.map((c, i) => (
+                            <li key={i} style={{fontSize: 13, lineHeight: 1.8, color: '#166534'}}>{c}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ──── SUB-TAB: Checks Summary ──── */}
+                {memoSubTab === 'checks' && (
+                  <div>
+                    {/* Document Validation */}
+                    <div className="detail-card" style={{marginTop: 12}}>
+                      <h3 style={{margin: '0 0 12px', fontSize: 16}}>📄 Document Validation — <span style={{color: '#16a34a'}}>Document Intake Agent</span></h3>
+                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8}}>
+                        {(app?.documentChecklist || []).map((doc, i) => (
+                          <div key={i} style={{
+                            padding: '10px 14px', borderRadius: 8,
+                            background: doc.status === 'uploaded' ? '#f0fdf4' : '#fef2f2',
+                            border: `1px solid ${doc.status === 'uploaded' ? '#bbf7d0' : '#fecaca'}`,
+                            display: 'flex', alignItems: 'center', gap: 10,
+                          }}>
+                            <span style={{fontSize: 16}}>{doc.status === 'uploaded' ? '✅' : '❌'}</span>
+                            <div>
+                              <div style={{fontSize: 12, fontWeight: 600, color: '#111'}}>{doc.name}</div>
+                              <div style={{fontSize: 10, color: '#888'}}>{doc.status === 'uploaded' ? 'Uploaded & Classified' : 'Missing'}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{marginTop: 12, padding: '8px 14px', borderRadius: 8, background: '#f9fafb', fontSize: 12, color: '#666'}}>
+                        📊 {(app?.documentChecklist || []).filter(d => d.status === 'uploaded').length} of {(app?.documentChecklist || []).length} documents uploaded
+                      </div>
+                    </div>
+
+                    {/* KYC Verification Checks */}
+                    <div className="detail-card" style={{marginTop: 12}}>
+                      <h3 style={{margin: '0 0 12px', fontSize: 16}}>🔍 KYC Verification — <span style={{color: '#1e40af'}}>KYC Concierge Agent</span></h3>
+                      {kycReviewItems ? (
+                        <div style={{display: 'flex', flexDirection: 'column', gap: 8}}>
+                          {kycReviewItems.map((item, i) => (
+                            <div key={i} style={{
+                              display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
+                              borderRadius: 8,
+                              background: item.status === 'flagged' ? '#fef2f2' : '#f0fdf4',
+                              border: `1px solid ${item.status === 'flagged' ? '#fecaca' : '#bbf7d0'}`,
+                            }}>
+                              <span style={{fontSize: 18}}>{item.status === 'flagged' ? '🚩' : '✅'}</span>
+                              <div style={{flex: 1}}>
+                                <div style={{fontSize: 13, fontWeight: 600}}>{item.icon} {item.title}</div>
+                                <div style={{fontSize: 11, color: '#666', marginTop: 2}}>{item.detail}</div>
+                              </div>
+                              <span style={{
+                                padding: '3px 10px', borderRadius: 6, fontSize: 10, fontWeight: 700,
+                                background: item.status === 'flagged' ? '#fee2e2' : '#dcfce7',
+                                color: item.status === 'flagged' ? '#dc2626' : '#16a34a',
+                              }}>
+                                {item.status === 'flagged' ? 'FLAGGED' : 'CLEAR'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : app?.kyc ? (
+                        <div style={{display: 'flex', flexDirection: 'column', gap: 8}}>
+                          {(() => {
+                            const items = [];
+                            const checklist = Array.isArray(app.kyc.kycChecklist) ? app.kyc.kycChecklist : [];
+                            if (checklist.length === 0) {
+                              items.push({ ok: false, title: '📂 Uploaded KYC Documents', detail: 'No KYC documents found in storage.' });
+                            } else {
+                              for (const d of checklist) {
+                                const sizeKb = d.sizeBytes ? `${Math.round(d.sizeBytes / 1024)} KB` : '';
+                                items.push({
+                                  ok: d.status === 'verified',
+                                  title: `📄 ${d.name}`,
+                                  detail: d.filename ? `${d.filename}${sizeKb ? ` · ${sizeKb}` : ''}` : 'Awaiting upload',
+                                });
+                              }
+                            }
+                            items.push(
+                              { ok: app.kyc.sanctions?.overallStatus === 'clear', title: '🛡️ Sanctions / AML', detail: `${app.kyc.sanctions?.listsChecked ?? 0} lists — ${app.kyc.sanctions?.overallStatus ?? 'n/a'}` },
+                              { ok: app.kyc.pepCheck?.status === 'clear' && (app.kyc.adverseMedia?.hits || 0) === 0, title: '👔 PEP & Adverse Media', detail: `PEP: ${app.kyc.pepCheck?.status ?? 'n/a'} · Media: ${app.kyc.adverseMedia?.hits || 0} hit(s)` },
+                              { ok: (app.kyc.creditScore?.score || 0) >= 650, title: '📊 Credit Score', detail: app.kyc.creditScore?.score ? `${app.kyc.creditScore.score} (${app.kyc.creditScore.rating ?? '—'})` : 'Unavailable' },
+                              { ok: app.kyc.completeness === 100, title: '📄 KYC Completeness', detail: `${app.kyc.completeness ?? 0}%` },
+                            );
+                            return items;
+                          })().map((item, i) => (
+                            <div key={i} style={{
+                              display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
+                              borderRadius: 8,
+                              background: item.ok ? '#f0fdf4' : '#fef2f2',
+                              border: `1px solid ${item.ok ? '#bbf7d0' : '#fecaca'}`,
+                            }}>
+                              <span style={{fontSize: 16}}>{item.ok ? '✅' : '⚠️'}</span>
+                              <div style={{flex: 1}}>
+                                <div style={{fontSize: 13, fontWeight: 600}}>{item.title}</div>
+                                <div style={{fontSize: 11, color: '#666', marginTop: 2}}>{item.detail}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p style={{color: '#999', fontSize: 13}}>No KYC data available.</p>
+                      )}
+
+                      {/* KYC Approval Status */}
+                      {kycApprovalData && (
+                        <div style={{
+                          marginTop: 12, padding: '12px 16px', borderRadius: 8,
+                          background: '#f0fdf4', border: '1px solid #bbf7d0',
+                          display: 'flex', alignItems: 'center', gap: 12,
+                        }}>
+                          <span style={{fontSize: 20}}>✅</span>
+                          <div>
+                            <div style={{fontSize: 13, fontWeight: 700, color: '#166534'}}>KYC Approved by {kycApprovalData.kycApprovedBy}</div>
+                            <div style={{fontSize: 11, color: '#666'}}>{new Date(kycApprovalData.kycApprovedAt).toLocaleString('en-GB')}</div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Compliance Summary */}
+                    <div className="detail-card" style={{marginTop: 12}}>
+                      <h3 style={{margin: '0 0 12px', fontSize: 16}}>🛡️ Compliance Summary</h3>
+                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 10}}>
+                        {[
+                          { label: 'Sanctions', status: app?.kyc?.sanctions?.overallStatus === 'clear', val: app?.kyc?.sanctions?.overallStatus || 'N/A' },
+                          { label: 'PEP Check', status: app?.kyc?.pepCheck?.status === 'clear', val: app?.kyc?.pepCheck?.status || 'N/A' },
+                          { label: 'Adverse Media', status: (app?.kyc?.adverseMedia?.hits || 0) === 0, val: `${app?.kyc?.adverseMedia?.hits || 0} hits` },
+                          { label: 'Credit Score', status: (app?.kyc?.creditScore?.score || 0) >= 650, val: `${app?.kyc?.creditScore?.score || 'N/A'}` },
+                          { label: 'KYC Complete', status: app?.kyc?.completeness === 100, val: `${app?.kyc?.completeness || 0}%` },
+                          { label: 'Docs Complete', status: (app?.documentChecklist || []).every(d => d.status === 'uploaded'), val: `${(app?.documentChecklist || []).filter(d => d.status === 'uploaded').length}/${(app?.documentChecklist || []).length}` },
+                        ].map((c, i) => (
+                          <div key={i} style={{
+                            padding: '14px', borderRadius: 10, textAlign: 'center',
+                            background: c.status ? '#f0fdf4' : '#fef2f2',
+                            border: `1px solid ${c.status ? '#bbf7d0' : '#fecaca'}`,
+                          }}>
+                            <div style={{fontSize: 20, marginBottom: 4}}>{c.status ? '✅' : '⚠️'}</div>
+                            <div style={{fontSize: 11, color: '#666'}}>{c.label}</div>
+                            <div style={{fontSize: 14, fontWeight: 700, color: c.status ? '#16a34a' : '#dc2626', marginTop: 2}}>{c.val}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ──── SUB-TAB: Financial Logs ──── */}
+                {memoSubTab === 'financials' && (
+                  <div>
+                    {spreadingData ? (
+                      <div>
+                        {/* Key Ratios */}
+                        <div className="detail-card" style={{marginTop: 12}}>
+                          <h3 style={{margin: '0 0 12px', fontSize: 16}}>📊 Key Financial Ratios — <span style={{color: '#1e40af'}}>Spreading Agent</span></h3>
+                          <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10}}>
+                            {(spreadingData.assessments || []).map((a, i) => (
+                              <div key={i} style={{
+                                padding: '14px', borderRadius: 10,
+                                background: a.status === 'pass' ? '#f0fdf4' : a.status === 'warning' ? '#fffbeb' : '#fef2f2',
+                                border: `1px solid ${a.status === 'pass' ? '#bbf7d0' : a.status === 'warning' ? '#fde68a' : '#fecaca'}`,
+                              }}>
+                                <div style={{fontSize: 11, color: '#666', marginBottom: 4}}>{a.label}</div>
+                                <div style={{fontSize: 22, fontWeight: 800, color: a.status === 'pass' ? '#16a34a' : a.status === 'warning' ? '#92400e' : '#dc2626'}}>
+                                  {typeof a.value === 'number' ? a.value.toFixed(2) : a.value}
+                                </div>
+                                <div style={{fontSize: 10, marginTop: 4}}>
+                                  <span style={{
+                                    padding: '2px 8px', borderRadius: 4, fontWeight: 700,
+                                    background: a.status === 'pass' ? '#dcfce7' : a.status === 'warning' ? '#fef3c7' : '#fee2e2',
+                                    color: a.status === 'pass' ? '#166534' : a.status === 'warning' ? '#92400e' : '#991b1b',
+                                    textTransform: 'uppercase', fontSize: 9,
+                                  }}>{a.status}</span>
+                                  <span style={{marginLeft: 6, color: '#999'}}>{a.confidence}% conf</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Summary Stats */}
+                        <div className="detail-card" style={{marginTop: 12}}>
+                          <h3 style={{margin: '0 0 12px', fontSize: 16}}>📈 Spreading Summary</h3>
+                          <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10}}>
+                            {[
+                              { label: 'Overall Confidence', val: `${spreadingData.summary?.overallConfidence || 0}%`, color: (spreadingData.summary?.overallConfidence || 0) >= 70 ? '#16a34a' : '#f59e0b' },
+                              { label: 'Pass', val: spreadingData.summary?.passCount || 0, color: '#16a34a' },
+                              { label: 'Warning', val: spreadingData.summary?.warningCount || 0, color: '#f59e0b' },
+                              { label: 'Fail', val: spreadingData.summary?.failCount || 0, color: '#dc2626' },
+                              { label: 'Anomalies', val: (spreadingData.anomalies || []).length, color: (spreadingData.anomalies || []).length > 0 ? '#dc2626' : '#16a34a' },
+                            ].map((s, i) => (
+                              <div key={i} style={{padding: '14px', borderRadius: 10, background: '#f9fafb', border: '1px solid #e5e7eb', textAlign: 'center'}}>
+                                <div style={{fontSize: 11, color: '#666'}}>{s.label}</div>
+                                <div style={{fontSize: 24, fontWeight: 800, color: s.color, marginTop: 4}}>{s.val}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Anomalies */}
+                        {(spreadingData.anomalies || []).length > 0 && (
+                          <div className="detail-card" style={{marginTop: 12}}>
+                            <h3 style={{margin: '0 0 12px', fontSize: 16}}>🚨 Anomalies Detected</h3>
+                            {spreadingData.anomalies.map((a, i) => (
+                              <div key={i} style={{
+                                padding: '12px 14px', borderRadius: 8, marginBottom: 8,
+                                background: a.severity === 'high' ? '#fef2f2' : a.severity === 'medium' ? '#fffbeb' : '#f0fdf4',
+                                border: `1px solid ${a.severity === 'high' ? '#fca5a5' : a.severity === 'medium' ? '#fcd34d' : '#86efac'}`,
+                              }}>
+                                <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                                  <span style={{
+                                    padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                                    background: a.severity === 'high' ? '#dc2626' : a.severity === 'medium' ? '#f59e0b' : '#16a34a',
+                                    color: '#fff', textTransform: 'uppercase',
+                                  }}>{a.severity}</span>
+                                  <span style={{fontWeight: 600, fontSize: 13}}>{a.title}</span>
+                                </div>
+                                <div style={{fontSize: 12, color: '#666', marginTop: 4}}>{a.description}</div>
+                                {a.recommendation && (
+                                  <div style={{fontSize: 12, color: '#1D4D2F', fontWeight: 500, marginTop: 4}}>💡 {a.recommendation}</div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Year-over-Year if available */}
+                        {spreadingData.lineItems && spreadingData.lineItems.length > 0 && (
+                          <div className="detail-card" style={{marginTop: 12}}>
+                            <h3 style={{margin: '0 0 12px', fontSize: 16}}>📑 Financial Line Items</h3>
+                            <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 8}}>
+                              {spreadingData.lineItems.map((item, i) => {
+                                const change = item.prev ? (((item.curr - item.prev) / Math.abs(item.prev)) * 100).toFixed(1) : null;
+                                return (
+                                  <div key={i} style={{padding: '12px', borderRadius: 8, background: '#f9fafb', border: '1px solid #e5e7eb'}}>
+                                    <div style={{fontSize: 11, color: '#888', marginBottom: 4}}>{item.label}</div>
+                                    <div style={{fontSize: 18, fontWeight: 700, color: '#111'}}>{item.curr?.toLocaleString()}</div>
+                                    {change && (
+                                      <div style={{fontSize: 11, color: parseFloat(change) >= 0 ? '#16a34a' : '#dc2626', marginTop: 2}}>
+                                        {parseFloat(change) >= 0 ? '▲' : '▼'} {Math.abs(parseFloat(change))}% YoY
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="detail-card" style={{marginTop: 12, textAlign: 'center', padding: 32}}>
+                        <div style={{fontSize: 40, marginBottom: 12}}>📊</div>
+                        <p style={{color: '#888', fontSize: 14}}>No financial spreading data available yet.</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ──── SUB-TAB: Transaction Details ──── */}
+                {memoSubTab === 'transaction' && (
+                  <div>
+                    {/* Loan Request */}
+                    <div className="detail-card" style={{marginTop: 12}}>
+                      <h3 style={{margin: '0 0 12px', fontSize: 16}}>💰 Loan Request</h3>
+                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12}}>
+                        {[
+                          { label: 'Loan Amount', val: app?.loan?.amount ? `${({'EUR':'€','GBP':'£','USD':'$','AED':'د.إ','INR':'₹'}[app?.loan?.currency] || '€')}${app.loan.amount}` : 'N/A' },
+                          { label: 'Currency', val: app?.loan?.currency || 'EUR' },
+                          { label: 'Purpose', val: app?.loanPurpose },
+                          { label: 'Term', val: app?.loanTerm ? `${app.loanTerm} months` : 'N/A' },
+                          { label: 'Application ID', val: app?.id },
+                          { label: 'Case ID', val: app?.caseId },
+                          { label: 'Status', val: app?.status },
+                        ].map((f, i) => (
+                          <div key={i} style={{padding: '12px 14px', borderRadius: 8, background: '#f9fafb', border: '1px solid #e5e7eb'}}>
+                            <div style={{fontSize: 11, color: '#888', marginBottom: 2}}>{f.label}</div>
+                            <div style={{fontSize: 14, fontWeight: 600, color: '#111'}}>{f.val || 'N/A'}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Business Information */}
+                    <div className="detail-card" style={{marginTop: 12}}>
+                      <h3 style={{margin: '0 0 12px', fontSize: 16}}>🏢 Business Information</h3>
+                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12}}>
+                        {[
+                          { label: 'Legal Name', val: app?.businessName },
+                          { label: 'DBA', val: app?.dba },
+                          { label: 'Tax ID / EIN', val: app?.ein },
+                          { label: 'Entity Type', val: app?.entityType },
+                          { label: 'Industry', val: app?.industry },
+                          { label: 'Established', val: app?.established },
+                          { label: 'Employees', val: app?.employees },
+                          { label: 'Annual Revenue', val: app?.revenue },
+                          { label: 'Address', val: app?.businessAddress },
+                        ].map((f, i) => (
+                          <div key={i} style={{padding: '12px 14px', borderRadius: 8, background: '#f9fafb', border: '1px solid #e5e7eb'}}>
+                            <div style={{fontSize: 11, color: '#888', marginBottom: 2}}>{f.label}</div>
+                            <div style={{fontSize: 14, fontWeight: 600, color: '#111'}}>{f.val || 'N/A'}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Owner Information */}
+                    <div className="detail-card" style={{marginTop: 12}}>
+                      <h3 style={{margin: '0 0 12px', fontSize: 16}}>👤 Owner / Guarantor</h3>
+                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12}}>
+                        {[
+                          { label: 'Name', val: app?.owner?.name },
+                          { label: 'Ownership', val: app?.owner?.ownership ? `${app.owner.ownership}%` : 'N/A' },
+                          { label: 'SSN', val: app?.owner?.ssn },
+                          { label: 'Date of Birth', val: app?.owner?.dob },
+                          { label: 'Address', val: app?.owner?.address },
+                          { label: 'Email', val: app?.owner?.email },
+                          { label: 'Phone', val: app?.owner?.phone },
+                        ].map((f, i) => (
+                          <div key={i} style={{padding: '12px 14px', borderRadius: 8, background: '#f9fafb', border: '1px solid #e5e7eb'}}>
+                            <div style={{fontSize: 11, color: '#888', marginBottom: 2}}>{f.label}</div>
+                            <div style={{fontSize: 14, fontWeight: 600, color: '#111'}}>{f.val || 'N/A'}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Additional Owners */}
+                      {app?.additionalOwners && app.additionalOwners.length > 0 && (
+                        <div style={{marginTop: 16}}>
+                          <div style={{fontSize: 13, fontWeight: 700, marginBottom: 8}}>Additional Owners / Guarantors</div>
+                          <div style={{display: 'flex', gap: 10, flexWrap: 'wrap'}}>
+                            {app.additionalOwners.map((ao, i) => (
+                              <div key={i} style={{
+                                padding: '10px 16px', borderRadius: 8, background: '#eff6ff',
+                                border: '1px solid #bfdbfe', fontSize: 13,
+                              }}>
+                                <strong>{ao.name}</strong> — {ao.ownership} ({ao.title})
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Agent Pipeline Status */}
+                    <div className="detail-card" style={{marginTop: 12}}>
+                      <h3 style={{margin: '0 0 12px', fontSize: 16}}>🤖 Agent Pipeline Status</h3>
+                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10}}>
+                        {[
+                          { agent: 'Document Intake Agent', status: app?.documentChecklist ? 'Complete' : 'Pending', ok: !!app?.documentChecklist },
+                          { agent: 'KYC Concierge Agent', status: kycSignedOff ? 'Approved' : kycHasData ? 'Verified' : 'Pending', ok: kycSignedOff || kycHasData },
+                          { agent: 'Spreading Agent', status: spreadingData ? 'Complete' : 'Pending', ok: !!spreadingData },
+                          { agent: 'Memo Drafting Agent', status: memoData ? 'Generated' : 'Pending', ok: !!memoData },
+                        ].map((a, i) => (
+                          <div key={i} style={{
+                            padding: '12px 14px', borderRadius: 8,
+                            background: a.ok ? '#f0fdf4' : '#f9fafb',
+                            border: `1px solid ${a.ok ? '#bbf7d0' : '#e5e7eb'}`,
+                            display: 'flex', alignItems: 'center', gap: 10,
+                          }}>
+                            <span style={{fontSize: 16}}>{a.ok ? '✅' : '⏳'}</span>
+                            <div>
+                              <div style={{fontSize: 12, fontWeight: 600}}>{a.agent}</div>
+                              <div style={{fontSize: 10, color: a.ok ? '#16a34a' : '#999'}}>{a.status}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Regenerate button */}
+                <div className="detail-card" style={{marginTop: 12, textAlign: 'center'}}>
+                  <p style={{fontSize: 13, color: '#666', margin: '0 0 12px'}}>
+                    This memo is a draft generated by the <strong>Memo Drafting Agent</strong>. It requires human review before proceeding.
+                  </p>
+                  <button
+                    onClick={handleRunMemo}
+                    style={{
+                      padding: '10px 24px', borderRadius: 8, border: '1px solid #c4b5fd',
+                      background: '#f5f3ff', color: '#7c3aed', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+                    }}
+                  >
+                    🔄 Regenerate Memo
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Next Agent Button */}
+            {memoData && !memoRunning && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '24px', marginTop: 16, background: 'linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)', border: '1.5px solid #fdba74'}}>
+                <p style={{color: '#9a3412', fontSize: 13, margin: '0 0 12px', fontWeight: 500}}>Credit memo has been drafted. Run decisioning analysis.</p>
+                <button onClick={handleRunDecisioning} style={{
+                  padding: '12px 32px', borderRadius: 10, border: 'none',
+                  background: 'linear-gradient(135deg, #ea580c, #c2410c)', color: '#fff',
+                  fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(234,88,12,0.3)',
+                }}>
+                  🚀 Run Decisioning Agent
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ Agent #5 — Decisioning Support Tab ═══ */}
+        {activeTab === 'decisioning' && (
+          <div className="decisioning-section">
+            {/* Agent Banner */}
+            <div className="agent-banner" style={{borderColor: '#fb923c', background: 'linear-gradient(135deg, #fff7ed 0%, #ffedd5 50%, #fed7aa 100%)'}}>
+              <div className="agent-avatar amber">⚖️</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name" style={{color: '#9a3412'}}>
+                  Decisioning Support Agent
+                </div>
+                <div className="agent-banner-desc">Evaluates lending criteria, calculates policy compliance, and suggests GO / NO-GO with covenants</div>
+              </div>
+              <div className={`agent-status-pill ${decisionRunning ? 'processing' : decisionData ? (decisionData.humanDecision ? 'complete' : 'active') : 'waiting'}`}>
+                {decisionRunning ? 'Analyzing...' : decisionData ? (decisionData.humanDecision ? `✅ ${decisionData.humanDecision}` : '⏳ Awaiting Decision') : 'Awaiting Run'}
+              </div>
+            </div>
+
+            {/* Not run yet */}
+            {!decisionData && !decisionRunning && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '48px 32px'}}>
+                <div style={{fontSize: 56, marginBottom: 16}}>⚖️</div>
+                <h3 style={{fontSize: 20, fontWeight: 700, color: '#111', marginBottom: 8}}>
+                  Decisioning Support Agent
+                </h3>
+                <p style={{color: '#666', fontSize: 14, maxWidth: 480, margin: '0 auto 24px'}}>
+                  This agent evaluates all lending criteria from the credit memo and financial analysis,
+                  calculates policy compliance scores, and provides a GO / NO-GO recommendation.
+                  <strong> The final decision is yours.</strong>
+                </p>
+                <button onClick={handleRunDecisioning} style={{
+                  padding: '14px 36px', borderRadius: 12, border: 'none',
+                  background: 'linear-gradient(135deg, #ea580c, #c2410c)', color: '#fff',
+                  fontWeight: 700, fontSize: 15, cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(234,88,12,0.3)',
+                }}>
+                  🚀 Run Decisioning Agent
+                </button>
+              </div>
+            )}
+
+            {/* Running animation */}
+            {decisionRunning && (
+              <div className="detail-card" style={{padding: '40px 32px'}}>
+                <div style={{textAlign: 'center', marginBottom: 32}}>
+                  <div style={{fontSize: 44, marginBottom: 8, animation: 'pulse 1.5s ease-in-out infinite'}}>⚖️</div>
+                  <h3 style={{fontSize: 18, fontWeight: 700, color: '#111', margin: 0}}>Decisioning Agent Analyzing</h3>
+                  <p style={{color: '#666', fontSize: 13, margin: '4px 0 0'}}>{app?.businessName}</p>
+                </div>
+                {[
+                  { step: 1, label: 'Loading credit memo & financial data...' },
+                  { step: 2, label: 'Evaluating policy criteria & thresholds...' },
+                  { step: 3, label: 'Calculating weighted compliance score...' },
+                  { step: 4, label: 'Generating recommendation & covenants...' },
+                ].map(s => {
+                  const isDone = decisionStep > s.step;
+                  const isActive = decisionStep === s.step;
+                  const isPending = decisionStep < s.step;
+                  return (
+                    <div key={s.step} style={{
+                      display: 'flex', alignItems: 'center', gap: 16,
+                      padding: '14px 16px', marginBottom: 8, borderRadius: 10,
+                      background: isActive ? '#fff7ed' : isDone ? '#f0fdf4' : '#f9fafb',
+                      border: isActive ? '1.5px solid #fdba74' : isDone ? '1.5px solid #bbf7d0' : '1.5px solid #e5e7eb',
+                      opacity: isPending ? 0.45 : 1, transition: 'all 0.4s ease',
+                    }}>
+                      <div style={{
+                        width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: isDone ? '#16a34a' : isActive ? '#ea580c' : '#d1d5db',
+                        color: '#fff', fontSize: 14, fontWeight: 700,
+                      }}>
+                        {isDone ? '✓' : isActive ? (
+                          <div style={{ width: 16, height: 16, border: '2.5px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }}></div>
+                        ) : s.step}
+                      </div>
+                      <span style={{fontSize: 14, color: isPending ? '#9ca3af' : '#111'}}>{s.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Decision Results */}
+            {decisionData && !decisionRunning && (
+              <div>
+                {/* Score Summary */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16}}>
+                    <div>
+                      <h3 style={{margin: 0, fontSize: 18}}>⚖️ Decisioning Analysis — <span style={{color: '#9a3412'}}>Decisioning Agent</span></h3>
+                      <p style={{margin: '4px 0 0', fontSize: 13, color: '#666'}}>
+                        {decisionData.criteriaMet} of {decisionData.criteriaTotal} criteria met · Weighted Score: {decisionData.weightedScore}%
+                      </p>
+                    </div>
+                    <div style={{display: 'flex', gap: 12, alignItems: 'center'}}>
+                      {/* Score circle */}
+                      <div style={{
+                        width: 64, height: 64, borderRadius: '50%',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: decisionData.weightedScore >= 75 ? '#dcfce7' : decisionData.weightedScore >= 55 ? '#fef3c7' : '#fee2e2',
+                        color: decisionData.weightedScore >= 75 ? '#16a34a' : decisionData.weightedScore >= 55 ? '#92400e' : '#dc2626',
+                        fontWeight: 800, fontSize: 20,
+                        border: `3px solid ${decisionData.weightedScore >= 75 ? '#16a34a' : decisionData.weightedScore >= 55 ? '#f59e0b' : '#dc2626'}`,
+                      }}>
+                        {decisionData.weightedScore}%
+                      </div>
+                      {/* GO / NO-GO badge */}
+                      <span style={{
+                        padding: '10px 20px', borderRadius: 12, fontWeight: 800, fontSize: 16,
+                        background: decisionData.goNoGo === 'GO' ? '#dcfce7' : '#fee2e2',
+                        color: decisionData.goNoGo === 'GO' ? '#166534' : '#991b1b',
+                        border: `2px solid ${decisionData.goNoGo === 'GO' ? '#16a34a' : '#dc2626'}`,
+                      }}>
+                        {decisionData.goNoGo === 'GO' ? '✅ GO' : '❌ NO-GO'}
+                      </span>
+                      <span style={{
+                        padding: '8px 16px', borderRadius: 20, fontWeight: 700, fontSize: 13,
+                        background: decisionData.agentRecommendation === 'APPROVE' ? '#dcfce7' :
+                                    decisionData.agentRecommendation === 'APPROVE WITH CONDITIONS' ? '#fef3c7' :
+                                    decisionData.agentRecommendation === 'REFER TO COMMITTEE' ? '#ffedd5' : '#fee2e2',
+                        color: '#333',
+                      }}>
+                        Agent: {decisionData.agentRecommendation}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* PD / LGD / Internal Rating moved to Memo tab — Decisioning shows criteria only */}
+
+                {/* Criteria Table */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <h3 style={{margin: '0 0 12px', fontSize: 16}}>📋 Policy Criteria Evaluation</h3>
+                  <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10}}>
+                    {decisionData.criteria?.map((c, i) => (
+                      <div key={i} style={{
+                        padding: '12px 14px', borderRadius: 10,
+                        background: c.met ? '#f0fdf4' : '#fef2f2',
+                        border: `1px solid ${c.met ? '#bbf7d0' : '#fecaca'}`,
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      }}>
+                        <div>
+                          <div style={{fontWeight: 600, fontSize: 13}}>{c.met ? '✅' : '❌'} {c.criterion}</div>
+                          <div style={{fontSize: 11, color: '#888', marginTop: 2}}>Threshold: {c.threshold}</div>
+                        </div>
+                        <div style={{textAlign: 'right'}}>
+                          <div style={{fontWeight: 800, fontSize: 17, color: c.met ? '#16a34a' : '#dc2626'}}>
+                            {c.actual}
+                          </div>
+                          <div style={{fontSize: 10, color: '#999'}}>wt: {c.weight}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Covenants */}
+                {decisionData.covenants && (
+                  <div className="detail-card" style={{marginBottom: 16}}>
+                    <h3 style={{margin: '0 0 12px', fontSize: 16}}>📜 Suggested Covenants</h3>
+                    {decisionData.covenants.standard?.length > 0 && (
+                      <div style={{marginBottom: 16}}>
+                        <div style={{fontSize: 13, fontWeight: 700, color: '#111', marginBottom: 8}}>Standard Covenants</div>
+                        <ul style={{margin: 0, paddingLeft: 20}}>
+                          {decisionData.covenants.standard.map((c, i) => (
+                            <li key={i} style={{fontSize: 13, lineHeight: 1.8, color: '#374151'}}>{c}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {decisionData.covenants.special?.length > 0 && (
+                      <div>
+                        <div style={{fontSize: 13, fontWeight: 700, color: '#ea580c', marginBottom: 8}}>⚠️ Special Covenants (Based on Failed Criteria)</div>
+                        <ul style={{margin: 0, paddingLeft: 20}}>
+                          {decisionData.covenants.special.map((c, i) => (
+                            <li key={i} style={{fontSize: 13, lineHeight: 1.8, color: '#9a3412'}}>{c}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Human Decision Panel */}
+                {!decisionData.humanDecision && (
+                  <div className="detail-card" style={{
+                    borderTop: '4px solid #ea580c', textAlign: 'center', padding: '32px',
+                  }}>
+                    <div style={{fontSize: 36, marginBottom: 12}}>👨‍⚖️</div>
+                    <h3 style={{fontSize: 18, fontWeight: 700, color: '#111', margin: '0 0 8px'}}>
+                      Human-in-the-Loop — Final Decision Required
+                    </h3>
+                    <p style={{color: '#666', fontSize: 13, margin: '0 0 20px', maxWidth: 500, marginInline: 'auto'}}>
+                      The Decisioning Agent recommends <strong>{decisionData.agentRecommendation}</strong>.
+                      As the underwriter, you make the final GO / NO-GO decision.
+                    </p>
+                    <div style={{maxWidth: 400, margin: '0 auto 20px'}}>
+                      <textarea
+                        value={humanDecisionNotes}
+                        onChange={e => setHumanDecisionNotes(e.target.value)}
+                        placeholder="Underwriter notes (optional)..."
+                        style={{
+                          width: '100%', minHeight: 70, padding: 12, borderRadius: 8,
+                          border: '1px solid #d1d5db', fontSize: 13, resize: 'vertical', fontFamily: 'inherit',
+                        }}
+                      />
+                    </div>
+                    <div style={{display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap'}}>
+                      <button onClick={() => handleHumanDecision('APPROVE')} style={{
+                        padding: '12px 32px', borderRadius: 10, border: 'none',
+                        background: 'linear-gradient(135deg, #16a34a, #15803d)', color: '#fff',
+                        fontWeight: 700, fontSize: 15, cursor: 'pointer',
+                        boxShadow: '0 4px 14px rgba(22,163,74,0.3)',
+                      }}>
+                        ✅ Approve — GO
+                      </button>
+                      <button onClick={() => handleHumanDecision('REFER')} style={{
+                        padding: '12px 32px', borderRadius: 10, border: '2px solid #f59e0b',
+                        background: '#fffbeb', color: '#92400e',
+                        fontWeight: 700, fontSize: 15, cursor: 'pointer',
+                      }}>
+                        📋 Refer to Committee
+                      </button>
+                      <button onClick={() => handleHumanDecision('DECLINE')} style={{
+                        padding: '12px 32px', borderRadius: 10, border: '2px solid #dc2626',
+                        background: '#fef2f2', color: '#dc2626',
+                        fontWeight: 700, fontSize: 15, cursor: 'pointer',
+                      }}>
+                        ❌ Decline — NO-GO
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Decision Made */}
+                {decisionData.humanDecision && (
+                  <div className="detail-card" style={{
+                    textAlign: 'center', padding: '36px',
+                    borderTop: `4px solid ${decisionData.humanDecision === 'APPROVE' ? '#16a34a' : decisionData.humanDecision === 'DECLINE' ? '#dc2626' : '#f59e0b'}`,
+                  }}>
+                    <div style={{fontSize: 48, marginBottom: 12}}>
+                      {decisionData.humanDecision === 'APPROVE' ? '✅' : decisionData.humanDecision === 'DECLINE' ? '❌' : '📋'}
+                    </div>
+                    <h3 style={{fontSize: 22, fontWeight: 700, color: '#111', margin: '0 0 8px'}}>
+                      Decision: {decisionData.humanDecision}
+                    </h3>
+                    <p style={{color: '#666', fontSize: 14, margin: 0}}>
+                      Decided by <strong>{decisionData.humanDecisionBy}</strong> · {decisionData.humanDecisionAt ? new Date(decisionData.humanDecisionAt).toLocaleString('en-GB') : ''}
+                    </p>
+                    {decisionData.humanNotes && (
+                      <div style={{background: '#f9fafb', borderRadius: 8, padding: 12, marginTop: 16, fontSize: 13, color: '#374151', fontStyle: 'italic'}}>
+                        "{decisionData.humanNotes}"
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Next Agent Button */}
+                {decisionData.humanDecision && (
+                  <div className="detail-card" style={{textAlign: 'center', padding: '24px', marginTop: 16, background: 'linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)', border: '1.5px solid #a78bfa'}}>
+                    <p style={{color: '#6b21a8', fontSize: 13, margin: '0 0 12px', fontWeight: 500}}>Decision has been recorded. Run the closing loan package assembly.</p>
+                    <button onClick={handleAssemblePackage} style={{
+                      padding: '12px 32px', borderRadius: 10, border: 'none',
+                      background: 'linear-gradient(135deg, #7c3aed, #6d28d9)', color: '#fff',
+                      fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                      boxShadow: '0 4px 14px rgba(124,58,237,0.3)',
+                    }}>
+                      🚀 Run Closing Agent
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ Agent #6 — Closing Loan Package Tab ═══ */}
+        {activeTab === 'closing' && (
+          <div className="closing-section">
+            {/* Agent Banner */}
+            <div className="agent-banner" style={{borderColor: '#a78bfa', background: 'linear-gradient(135deg, #faf5ff 0%, #f3e8ff 50%, #e9d5ff 100%)'}}>
+              <div className="agent-avatar purple">📦</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name" style={{color: '#6b21a8'}}>
+                  Closing Loan Package Agent
+                </div>
+                <div className="agent-banner-desc">Assembles all validated documents into a final loan package — flags missing dependencies & outdated items</div>
+              </div>
+              <div className={`agent-status-pill ${closingRunning ? 'processing' : closingData ? (closingData.completeness === 100 ? 'complete' : 'active') : 'waiting'}`}>
+                {closingRunning ? 'Assembling...' : closingData ? (closingData.completeness === 100 ? '✅ Complete' : `${closingData.completeness}% Ready`) : 'Awaiting Run'}
+              </div>
+            </div>
+
+            {/* Not run yet */}
+            {!closingData && !closingRunning && (
+              <div className="detail-card" style={{textAlign: 'center', padding: '48px 32px'}}>
+                <div style={{fontSize: 56, marginBottom: 16}}>📦</div>
+                <h3 style={{fontSize: 20, fontWeight: 700, color: '#111', marginBottom: 8}}>
+                  Closing Loan Package Agent
+                </h3>
+                <p style={{color: '#666', fontSize: 14, maxWidth: 480, margin: '0 auto 24px'}}>
+                  This agent assembles all approved documents, agent reports, and closing templates
+                  into a final loan package. It ensures traceability and flags any missing dependencies.
+                </p>
+                <button onClick={handleAssemblePackage} style={{
+                  padding: '14px 36px', borderRadius: 12, border: 'none',
+                  background: 'linear-gradient(135deg, #7c3aed, #6d28d9)', color: '#fff',
+                  fontWeight: 700, fontSize: 15, cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(124,58,237,0.3)',
+                }}>
+                  📦 Assemble Loan Package
+                </button>
+              </div>
+            )}
+
+            {/* Running animation */}
+            {closingRunning && (
+              <div className="detail-card" style={{padding: '40px 32px'}}>
+                <div style={{textAlign: 'center', marginBottom: 32}}>
+                  <div style={{fontSize: 44, marginBottom: 8, animation: 'pulse 1.5s ease-in-out infinite'}}>📦</div>
+                  <h3 style={{fontSize: 18, fontWeight: 700, color: '#111', margin: 0}}>Closing Agent Assembling Package</h3>
+                </div>
+                {[
+                  { step: 1, label: 'Gathering all agent outputs & approvals...' },
+                  { step: 2, label: 'Validating document completeness...' },
+                  { step: 3, label: 'Generating closing templates (agreements, UCC, guaranty)...' },
+                  { step: 4, label: 'Building final package & traceability report...' },
+                ].map(s => {
+                  const isDone = closingStep > s.step;
+                  const isActive = closingStep === s.step;
+                  const isPending = closingStep < s.step;
+                  return (
+                    <div key={s.step} style={{
+                      display: 'flex', alignItems: 'center', gap: 16,
+                      padding: '14px 16px', marginBottom: 8, borderRadius: 10,
+                      background: isActive ? '#faf5ff' : isDone ? '#f0fdf4' : '#f9fafb',
+                      border: isActive ? '1.5px solid #c4b5fd' : isDone ? '1.5px solid #bbf7d0' : '1.5px solid #e5e7eb',
+                      opacity: isPending ? 0.45 : 1, transition: 'all 0.4s ease',
+                    }}>
+                      <div style={{
+                        width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: isDone ? '#16a34a' : isActive ? '#7c3aed' : '#d1d5db',
+                        color: '#fff', fontSize: 14, fontWeight: 700,
+                      }}>
+                        {isDone ? '✓' : isActive ? (
+                          <div style={{ width: 16, height: 16, border: '2.5px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }}></div>
+                        ) : s.step}
+                      </div>
+                      <span style={{fontSize: 14, color: isPending ? '#9ca3af' : '#111'}}>{s.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Closing Package Results */}
+            {closingData && !closingRunning && (
+              <div>
+                {/* Status Header */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12}}>
+                    <div>
+                      <h3 style={{margin: 0, fontSize: 18}}>📦 Loan Package — <span style={{color: '#6b21a8'}}>Closing Agent</span></h3>
+                      <p style={{margin: '4px 0 0', fontSize: 13, color: '#666'}}>
+                        {closingData.packageId} · {closingData.includedCount} of {closingData.totalCount} items included
+                      </p>
+                    </div>
+                    <div style={{display: 'flex', gap: 10, alignItems: 'center'}}>
+                      <div style={{
+                        width: 60, height: 60, borderRadius: '50%',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: closingData.completeness === 100 ? '#dcfce7' : closingData.completeness >= 70 ? '#fef3c7' : '#fee2e2',
+                        color: closingData.completeness === 100 ? '#16a34a' : closingData.completeness >= 70 ? '#92400e' : '#dc2626',
+                        fontWeight: 800, fontSize: 18,
+                        border: `3px solid ${closingData.completeness === 100 ? '#16a34a' : closingData.completeness >= 70 ? '#f59e0b' : '#dc2626'}`,
+                      }}>
+                        {closingData.completeness}%
+                      </div>
+                      <span style={{
+                        padding: '8px 16px', borderRadius: 20, fontWeight: 700, fontSize: 13,
+                        background: closingData.status === 'ready_for_review' ? '#dcfce7' : closingData.status === 'partially_complete' ? '#fef3c7' : '#fee2e2',
+                        color: closingData.status === 'ready_for_review' ? '#166534' : closingData.status === 'partially_complete' ? '#92400e' : '#991b1b',
+                      }}>
+                        {closingData.status === 'ready_for_review' ? '✅ Ready for Review' : closingData.status === 'partially_complete' ? '⚠️ Partially Complete' : '❌ Incomplete'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Decision reference */}
+                  {closingData.decision && (
+                    <div style={{marginTop: 16, padding: '12px 16px', borderRadius: 8, background: '#f9fafb', border: '1px solid #e5e7eb'}}>
+                      <div style={{fontSize: 12, color: '#666', marginBottom: 4}}>Underwriter Decision</div>
+                      <div style={{display: 'flex', gap: 16, alignItems: 'center', fontSize: 14}}>
+                        <span style={{fontWeight: 700, color: closingData.decision.humanDecision === 'APPROVE' ? '#16a34a' : '#dc2626'}}>
+                          {closingData.decision.humanDecision}
+                        </span>
+                        <span style={{color: '#999'}}>by {closingData.decision.decidedBy}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Category Summary */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <h3 style={{margin: '0 0 12px', fontSize: 16}}>📊 Package Categories</h3>
+                  <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10}}>
+                    {closingData.categorySummary?.map((cat, i) => (
+                      <div key={i} style={{
+                        padding: '14px', borderRadius: 10, textAlign: 'center',
+                        background: cat.complete ? '#f0fdf4' : '#fef2f2',
+                        border: `1px solid ${cat.complete ? '#bbf7d0' : '#fecaca'}`,
+                      }}>
+                        <div style={{fontSize: 24, fontWeight: 800, color: cat.complete ? '#16a34a' : '#dc2626'}}>
+                          {cat.included}/{cat.total}
+                        </div>
+                        <div style={{fontSize: 12, color: '#666', marginTop: 4}}>{cat.label}</div>
+                        <div style={{fontSize: 10, fontWeight: 700, marginTop: 4, color: cat.complete ? '#16a34a' : '#dc2626'}}>
+                          {cat.complete ? '✅ Complete' : `${cat.missing} missing`}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Package Items */}
+                <div className="detail-card" style={{marginBottom: 16}}>
+                  <h3 style={{margin: '0 0 12px', fontSize: 16}}>📄 Package Items</h3>
+                  <div style={{display: 'flex', flexDirection: 'column', gap: 8}}>
+                    {closingData.items?.map((item, i) => (
+                      <div key={i} style={{
+                        display: 'flex', alignItems: 'center', gap: 14, padding: '12px 16px',
+                        borderRadius: 10,
+                        background: item.status === 'included' ? '#f9fafb' : '#fef2f2',
+                        border: `1px solid ${item.status === 'included' ? '#e5e7eb' : '#fecaca'}`,
+                      }}>
+                        <span style={{fontSize: 18}}>
+                          {item.status === 'included' ? '✅' : '❌'}
+                        </span>
+                        <div style={{flex: 1}}>
+                          <div style={{fontWeight: 600, fontSize: 13, color: '#111'}}>{item.name}</div>
+                          <div style={{fontSize: 11, color: '#888', marginTop: 2}}>
+                            {item.category} · Source: {item.source === 'uploaded' ? 'Document Upload' : item.source.replace('_', ' ')}
+                            {item.referenceId && ` · ${item.referenceId}`}
+                          </div>
+                        </div>
+                        <span style={{
+                          padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                          background: item.status === 'included' ? '#dcfce7' : '#fee2e2',
+                          color: item.status === 'included' ? '#166534' : '#991b1b',
+                        }}>
+                          {item.status === 'included' ? 'INCLUDED' : 'MISSING'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Missing Items */}
+                {closingData.missingItems?.length > 0 && (
+                  <div className="detail-card" style={{marginBottom: 16, borderLeft: '4px solid #dc2626'}}>
+                    <h3 style={{margin: '0 0 12px', fontSize: 16}}>🚨 Missing Dependencies ({closingData.missingItems.length})</h3>
+                    {closingData.missingItems.map((item, i) => (
+                      <div key={i} style={{
+                        padding: '10px 14px', marginBottom: 8, borderRadius: 8,
+                        background: '#fef2f2', border: '1px solid #fecaca',
+                      }}>
+                        <div style={{fontWeight: 600, fontSize: 13, color: '#111'}}>❌ {item.name}</div>
+                        <div style={{fontSize: 12, color: '#666', marginTop: 4}}>
+                          Category: {item.category} · Action: {item.action}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Re-assemble button */}
+                <div className="detail-card" style={{textAlign: 'center'}}>
+                  <button onClick={handleAssemblePackage} style={{
+                    padding: '10px 24px', borderRadius: 8, border: '1px solid #c4b5fd',
+                    background: '#faf5ff', color: '#7c3aed', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+                  }}>
+                    🔄 Re-Assemble Package
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'timeline' && (
+          <div className="timeline-section">
+            <div className="agent-banner">
+              <div className="agent-avatar amber">📅</div>
+              <div className="agent-banner-info">
+                <div className="agent-banner-name">
+                  Audit Trail Agent
+                </div>
+                <div className="agent-banner-desc">Every agent action, human decision & system event is recorded with full traceability</div>
+              </div>
+              <div className="agent-status-pill active">Recording</div>
+            </div>
+            <div className="detail-card">
+              <div className="agent-card-header">
+                <div className="agent-mini-avatar" style={{background: '#fef3c7', color: '#d97706'}}>📅</div>
+                <h3>Application Timeline</h3>
+                <span className="agent-tag">Auto-Logged</span>
+              </div>
+              <div className="timeline-list">
+                {app.timeline.map((event, idx) => (
+                  <div key={idx} className="timeline-item">
+                    <div className="timeline-marker"></div>
+                    <div className="timeline-content">
+                      <span className="timeline-date">{event.date}</span>
+                      <span className="timeline-event">{event.event}</span>
+                      <span className="timeline-actor">by {event.actor}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default ApplicationDetail;

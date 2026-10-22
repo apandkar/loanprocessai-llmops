@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Bank/Temple icon - orange -->
+  <g fill="#D4870E">
+    <!-- Roof triangle -->
+    <polygon points="50,10 8,42 92,42" />
+    <!-- Entablature -->
+    <rect x="8" y="42" width="84" height="6" />
+    <!-- 4 Pillars evenly spaced -->
+    <rect x="18" y="48" width="10" height="32" rx="2" />
+    <rect x="37" y="48" width="10" height="32" rx="2" />
+    <rect x="53" y="48" width="10" height="32" rx="2" />
+    <rect x="72" y="48" width="10" height="32" rx="2" />
+    <!-- Base/Foundation -->
+    <rect x="8" y="80" width="84" height="8" rx="2" />
+  </g>
+</svg>

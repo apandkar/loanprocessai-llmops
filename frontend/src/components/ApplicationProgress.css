@@ -1,0 +1,149 @@
+.progress-container {
+  background: white;
+  padding: 20px 32px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.progress-icon {
+  font-size: 20px;
+}
+
+.progress-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--secondary-green);
+}
+
+.progress-tracker {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  max-width: 900px;
+  margin: 0 auto;
+  position: relative;
+}
+
+.progress-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  flex: 1;
+}
+
+.step-circle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  background: #e5e7eb;
+  color: var(--text-gray);
+  position: relative;
+  z-index: 2;
+  transition: all 0.3s ease;
+}
+
+.step-circle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.progress-step.completed .step-circle {
+  background: var(--secondary-green);
+  color: white;
+}
+
+.progress-step.active .step-circle {
+  background: #3b82f6;
+  color: white;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
+}
+
+.active-dot {
+  width: 10px;
+  height: 10px;
+  background: white;
+  border-radius: 50%;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 0.8;
+  }
+}
+
+.step-label {
+  font-size: 12px;
+  color: var(--text-gray);
+  margin-top: 10px;
+  text-align: center;
+  max-width: 80px;
+}
+
+.progress-step.completed .step-label {
+  color: var(--secondary-green);
+}
+
+.progress-step.active .step-label {
+  color: #3b82f6;
+  font-weight: 600;
+}
+
+.step-connector {
+  position: absolute;
+  top: 20px;
+  left: calc(50% + 20px);
+  width: calc(100% - 40px);
+  height: 3px;
+  background: #e5e7eb;
+  z-index: 1;
+}
+
+.step-connector.completed {
+  background: var(--secondary-green);
+}
+
+@media (max-width: 768px) {
+  .progress-container {
+    padding: 16px;
+    overflow-x: auto;
+  }
+
+  .progress-tracker {
+    min-width: 600px;
+    padding-bottom: 8px;
+  }
+
+  .step-circle {
+    width: 32px;
+    height: 32px;
+    font-size: 12px;
+  }
+
+  .step-label {
+    font-size: 10px;
+  }
+
+  .step-connector {
+    top: 16px;
+    left: calc(50% + 16px);
+    width: calc(100% - 32px);
+  }
+}

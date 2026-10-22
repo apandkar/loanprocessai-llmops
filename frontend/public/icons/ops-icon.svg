@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <g fill="#2d2d2d">
+    <!-- Center gear -->
+    <path d="M56 18 L53 18 L51 12 L47 12 L45 18 L42 19 L37 15 L34 18 L37 23 L36 26 L30 27 L30 31 L36 33 L37 36 L33 40 L36 43 L41 40 L44 42 L44 48 L48 48 L50 42 L53 42 L56 47 L60 46 L58 40 L61 38 L66 41 L68 37 L63 34 L63 31 L69 29 L68 25 L63 25 L61 22 L65 18 L62 15 L58 19 L56 18Z" />
+    <circle cx="49" cy="30" r="7" fill="white" />
+    <circle cx="49" cy="30" r="2.5" fill="#2d2d2d" />
+    <!-- Top-right arrow arc -->
+    <path d="M65 14 A30 30 0 0 1 82 38" fill="none" stroke="#2d2d2d" stroke-width="5" stroke-linecap="round" />
+    <polygon points="84,38 78,32 76,40" />
+    <!-- Bottom-left arrow arc -->
+    <path d="M33 55 A30 30 0 0 1 16 32" fill="none" stroke="#2d2d2d" stroke-width="5" stroke-linecap="round" />
+    <polygon points="14,32 20,38 22,30" />
+    <!-- Bottom gear (smaller) -->
+    <path d="M62 58 L60 58 L59 54 L56 54 L55 58 L53 59 L50 56 L48 58 L50 61 L49 63 L45 64 L46 67 L49 67 L50 69 L48 72 L50 74 L53 72 L55 73 L55 77 L58 77 L59 73 L61 72 L63 75 L65 73 L63 70 L64 68 L68 67 L68 64 L64 63 L63 61 L66 59 L64 57 L62 58Z" />
+    <circle cx="57" cy="65" r="5" fill="white" />
+    <circle cx="57" cy="65" r="2" fill="#2d2d2d" />
+  </g>
+</svg>
